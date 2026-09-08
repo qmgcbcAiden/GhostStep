@@ -1,14 +1,14 @@
 -- decision/fallback.lua
--- 轻量 DWA 候选评分（Phase 2.4 升级版 + 性能重构版）
--- 两阶段评估: 粗评(16方向×1速度,无清晰度) → 精评(top5方向×3速度+清晰度)
+-- 轻量 DWA 候选评分（Phase 2.4 升级版 + 性能重构版 + Tier 1 时空轨迹评分）
+-- 两阶段评估: 粗评(16方向×1速度,无轨迹评分) → 精评(top5方向×3速度+轨迹评分)
 -- 计算量约为全量版(51候选×清晰度)的 1/6 —— 实测 14 敌人场景全量版 7-21ms
 -- 超预算(原则4)，重构后回到 1ms 量级
 --
--- 评分维度: 碰撞时间 / 弹道线逃逸 / 墙壁惩罚 / 路径清晰度(仅精评) / 趋势对齐 / 输入对齐
+-- 评分维度: 碰撞时间 / 弹道线逃逸 / 墙壁惩罚 / 时空轨迹评分(仅精评) / 趋势对齐 / 输入对齐
 --
 -- DWA 升级点（相对 Phase 1 版）：
 --   1. 多速度候选（慢2/中5/快8 px/帧）—— 能找到窄间隙低速穿过的路径
---   2. 路径清晰度评分 —— 沿候选路径N帧内距最近威胁的最小距离（越大越好）
+--   2. 时空轨迹评分（Tier 1）—— 分级 horizon {4,8,16,24} 外推，近期保命+远期择路
 --   3. 趋势对齐 —— 与弹幕场梯度规避方向对齐加分（更聪明的"朝安全区走"）
 
 local Fallback = {}
@@ -19,9 +19,15 @@ local CANDIDATE_DIR_COUNT = 16 -- 方向采样数（弹幕>50时降级到8）
 local SPEED_LEVELS = { 2, 5, 8 } -- 多速度候选（慢/中/快，像素/帧）
 local COARSE_SPEED = 5 -- 粗评用的中速档
 local TOP_REFINE = 5 -- 精评的方向数
-local CLARITY_FRAMES = 8 -- 路径清晰度检查帧数
-local CLARITY_STEP = 4 -- 清晰度步进帧数（性能换精度；步长4=2步）
-local SCAN_RADIUS = 400 -- 威胁纳入半径（预过滤一次，替代逐候选重复距离过滤）
+-- 轨迹评分: 分级 horizon 外推（Tier 1，替代旧版2档线性清晰度）
+-- 近期保命 + 远期择路 + 远期收敛奖励
+local FutureMotion = require("threat/future_motion")
+local HORIZONS = { 4, 8, 16, 24 }
+local HORIZON_WEIGHT = { 1.0, 0.7, 0.5, 0.4 }   -- 近期重、远期轻
+local CONVERGE_BONUS_T = 24                        -- 远期收敛奖励档
+local CONVERGE_CLEARANCE = 60                      -- px（远期 clearance > 此值 → 奖励）
+local CONVERGE_BONUS = 12                          -- 收敛奖励分值
+local SCAN_RADIUS = 400                            -- 威胁纳入半径（预过滤一次，替代逐候选重复距离过滤）
 
 --- 评估单个候选方向+速度。withClarity=false 时跳过清晰度评分（粗评用）
 --- 返回分数（越低越好）
@@ -97,25 +103,47 @@ local function scoreCandidate(dir, speed, ctx, withClarity)
         end
     end
 
-    -- 4. 路径清晰度评分（DWA 核心，仅精评阶段）：沿候选路径步进检查距
-    --    所有近距威胁的最小距离，最小值即"路径清晰度"
+    -- 4. 时空轨迹评分（Tier 1 核心，仅精评阶段）：分级 horizon 检查沿候选路径
+    --    各威胁按自身运动模型外推后的位置，近期权重高（保命）、远期权重低（择路）。
+    --    远期收敛奖励：t=24 处 clearance > 60px 的候选给大额奖励——"移动到未来的洞"
     if withClarity then
         local minClearance = math.huge
-        for t = CLARITY_STEP, CLARITY_FRAMES, CLARITY_STEP do
+        local convergeClearance = math.huge -- t=CONVERGE_BONUS_T 处的 clearance
+        for hi = 1, #HORIZONS do
+            local t = HORIZONS[hi]
             local futurePos = playerPos + simVel * t
+            local w = HORIZON_WEIGHT[hi]
             for i = 1, #hazards do
                 local h = hazards[i]
-                -- 威胁未来位置（线性外推）
-                local hFuture = h.pos + h.vel * t
-                local dist = futurePos:Distance(hFuture) - playerRadius - h.radius
-                if dist < minClearance then
-                    minClearance = dist
+                local hp, hp2 = FutureMotion.pos(h, t, ctx.frame)
+                if hp then
+                    local dist
+                    if hp2 then
+                        -- laser: hp2 是线段第二端点，用点到线段距离
+                        local dSq = FutureMotion._pointSegmentDistSq(
+                            futurePos.X, futurePos.Y,
+                            hp.X, hp.Y, hp2.X, hp2.Y)
+                        dist = math.sqrt(dSq) - playerRadius - h.radius
+                    else
+                        dist = futurePos:Distance(hp) - playerRadius - h.radius
+                    end
+                    local penalty = dist * w -- 加权距离（近期更敏感）
+                    if penalty < minClearance then
+                        minClearance = penalty
+                    end
+                    if t == CONVERGE_BONUS_T and dist < convergeClearance then
+                        convergeClearance = dist
+                    end
                 end
             end
         end
-        if minClearance < 40 then -- 40px 内有威胁
+        if minClearance < 40 then
             local penalty = (40 - minClearance) * 0.5
             score = score + penalty * penalty * 0.1
+        end
+        -- 远期收敛奖励：t=24 处所有威胁都离得远 → "移动到安全洞"
+        if convergeClearance > CONVERGE_CLEARANCE then
+            score = score - CONVERGE_BONUS
         end
     end
 
@@ -187,6 +215,7 @@ function Fallback.compute(state, deps, frame, traceOut)
         playerInput = player.inputDir,
         nearHazards = nearHazards,
         horizon = 28,
+        frame = frame, -- Tier 1: 圆弧缓存需要当前帧号
         onLineDistance = 10,
         minPerp = 0.3,
         terrain = deps.terrain,

@@ -55,7 +55,7 @@ function Defaults.get()
         ownershipCacheTtl = 180,    -- 弹幕归属缓存帧数
         maxProjectiles = 300,       -- 弹幕采集上限（防御）
         degradeThreshold = 50,      -- 弹幕数超过此值 → 采样降级
-        budgetMs = 1.0,             -- 每帧决策预算（毫秒，原则4）
+        budgetMs = 1.5,             -- 每帧决策预算（毫秒，原则4；Tier 1 轨迹评分需要更大预算）
 
         ---------------------------------------------------------------
         -- 显示

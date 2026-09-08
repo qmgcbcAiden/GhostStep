@@ -12,6 +12,7 @@ local HazardQuery = {}
 
 local Spatial = require("threat/spatial")
 local Predict = require("threat/projectile_predict")
+local FutureMotion = require("threat/future_motion")
 
 -- atan2 兼容: Lua 5.1 有 math.atan2，5.3 合并进 math.atan(y,x)
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
@@ -56,29 +57,9 @@ end
 --- 静止激光: 起点→终点；旋转激光: 终点绕起点按 rotSpd*t 度旋转；
 --- 数据完全缺失（无 endPos 无 length）时退化为 pos→pos+vel 线段
 --- （vel 短≈点碰撞，vel 长≈终点偏移，兼容几何数据读不到的激光）
+--- 共用 future_motion.laserSegmentAt，避免代码重复
 local function laserSegmentAt(entry, t)
-    local a = entry.pos + entry.vel * t -- 移动型激光整体平移
-    local b
-    if entry.endPos then
-        b = entry.endPos + entry.vel * t
-    elseif (entry.length or 0) > 0 then
-        -- 无终点：用角度×长度合成
-        local ang = math.rad((entry.angle or 0) + (entry.rotSpd or 0) * t)
-        b = a + Vector(math.cos(ang) * entry.length, math.sin(ang) * entry.length)
-    else
-        b = entry.pos + entry.vel -- 几何数据缺失兜底: vel 即终点偏移（线段固定，t 只动玩家）
-    end
-    -- 旋转外推: 终点绕起点旋转（当帧终点 + rotSpd 外推即未来扫掠位置）
-    local rot = (entry.rotSpd or 0) * t
-    if rot ~= 0 then
-        local rel = b - a
-        local len = rel:Length()
-        if len > 0.01 then
-            local ang = atan2(rel.Y, rel.X) + math.rad(rot)
-            b = a + Vector(math.cos(ang) * len, math.sin(ang) * len)
-        end
-    end
-    return a, b
+    return FutureMotion.laserSegmentAt(entry, t)
 end
 
 --- 激光命中帧：步进 2 帧检查玩家未来位置到激光线段的距离

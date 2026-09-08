@@ -25,6 +25,7 @@ local EffectSensor      = require("sensors/effects")
 local NpcAttackSensor   = require("sensors/npc_attacks")
 local PlayerSensor      = require("sensors/player")
 local HazardQuery       = require("threat/hazard_query")
+local FutureMotion      = require("threat/future_motion")
 local ThreatLevel       = require("threat/threat_level")
 local Pipeline          = require("decision/pipeline")
 local EscapeLock        = require("decision/escape_lock")
@@ -165,6 +166,7 @@ local function onNewRoom()
     trackerNpcAttacks:clear()
     EnemySensor.resetRoom()
     escapeLock:reset()
+    FutureMotion.clearCache() -- Tier 1: 圆弧参数缓存按房间隔离
     -- 延迟提交：先验证房间数据有效，无效下一帧重试
     local ok, room = pcall(function() return Game():GetRoom() end)
     if ok and room ~= nil then

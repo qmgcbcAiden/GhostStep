@@ -921,6 +921,132 @@ check("enemy sensor: fireplace captured with enlarged flame radius", function()
     SMOKE.entities = {}
 end)
 
+-- ===== Tier 1: future_motion 外推器 =====
+local FutureMotion = require("threat/future_motion")
+
+check("future_motion: arc projectile extrapolates on circle", function()
+    -- 构造圆弧运动历史: 圆心(0,0) 半径100, 每帧转5度
+    local history = {}
+    for i = 1, 10 do
+        local ang = (i - 1) * math.rad(5)
+        history[i] = { pos = Vector(100 * math.cos(ang), 100 * math.sin(ang)), frame = i }
+    end
+    local entry = {
+        pos = history[10].pos, vel = Vector(0, 0), radius = 5,
+        kind = "projectile",
+        history = history, historyCount = 10,
+    }
+    -- t=10 帧后: 最新帧角度=45°，+50°=95°
+    local fp = FutureMotion.pos(entry, 10, 10)
+    assert(fp, "should produce position")
+    local expectedAng = math.rad(95)
+    local expectedX = 100 * math.cos(expectedAng)
+    local expectedY = 100 * math.sin(expectedAng)
+    assert(math.abs(fp.X - expectedX) < 5, "arc X off: " .. tostring(fp.X) .. " vs " .. expectedX)
+    assert(math.abs(fp.Y - expectedY) < 5, "arc Y off: " .. tostring(fp.Y) .. " vs " .. expectedY)
+    -- 清缓存
+    FutureMotion.clearCache()
+end)
+
+check("future_motion: tracking uses trend velocity", function()
+    -- 追踪型弹幕: 速度方向持续变化
+    local history = {}
+    for i = 1, 6 do
+        local ang = (i - 1) * math.rad(5)
+        history[i] = {
+            pos = Vector(i * 5, 0),
+            vel = Vector(10 * math.cos(ang), 10 * math.sin(ang)),
+            frame = i,
+        }
+    end
+    local entry = {
+        pos = history[6].pos, vel = history[6].vel, radius = 5,
+        kind = "projectile",
+        history = history, historyCount = 6,
+    }
+    local fp = FutureMotion.pos(entry, 5, 6)
+    assert(fp, "tracking should produce position")
+    -- 平均速度 ≈ (v5+v6)/2 → 位置应偏移 5*avgVel
+    local avgX = (history[5].vel.X + history[6].vel.X) / 2
+    local avgY = (history[5].vel.Y + history[6].vel.Y) / 2
+    local expectedX = entry.pos.X + avgX * 5
+    local expectedY = entry.pos.Y + avgY * 5
+    assert(math.abs(fp.X - expectedX) < 1, "tracking X: " .. tostring(fp.X))
+    assert(math.abs(fp.Y - expectedY) < 1, "tracking Y: " .. tostring(fp.Y))
+    FutureMotion.clearCache()
+end)
+
+check("future_motion: npc_attack nonexistent before appearFrame", function()
+    local entry = {
+        pos = Vector(100, 100), vel = Vector(0, 0), radius = 60,
+        kind = "npc_attack",
+        appearFrame = 30, -- 30帧后才出现
+    }
+    -- t=5（距 frame=10 还有 15 帧才到 appearFrame=30）→ 应返回 nil
+    local fp = FutureMotion.pos(entry, 5, 10)
+    assert(fp == nil, "before appearFrame should be nil, got " .. tostring(fp))
+    -- t=25（frame=10+25=35 >= appearFrame=30）→ 应返回位置
+    local fp2 = FutureMotion.pos(entry, 25, 10)
+    assert(fp2 ~= nil, "after appearFrame should have position")
+    assert(fp2.X == 100 and fp2.Y == 100, "stationary npc_attack stays at pos")
+end)
+
+check("trajectory: converging candidate scores better", function()
+    -- 构造"向右走 t=8 撞弹幕，向左走安全且 t=24 收敛"场景:
+    -- 弹幕从正右方 (200,0) 静止不动；玩家朝右走 t=8 到达 (40,0)
+    -- → dist = |200-40| - 10 - 8 = 142 (大距离,无碰撞) → 不够近
+    -- 改: 弹幕从右方 (60,0) 静止, 玩家朝右 8*5=40 → dist = |60-40|-18 = 2 < 40 → 罚分!
+    -- 朝左: t=8 到 (-40,0) → dist = |60-(-40)|-18 = 82 > 60 → 收敛奖励
+    local tracker = Tracker2.create()
+    tracker:update({ {
+        index = 1, pos = Vector(60, 0), vel = Vector(0, 0),
+        speed = 0, radius = 8,
+    } }, 0, "projectile")
+    local state = {
+        player = { position = Vector(0, 0), velocity = Vector(0, 0), radius = 10,
+                   inputDir = Vector(0, 0) },
+        decision = {}, threat = {},
+    }
+    local terrain = Terrain.create()
+    local cfg = require("config/defaults").get()
+    local dir = Fallback.compute(state, {
+        config = cfg, tracker = tracker,
+        getHazards = function() return tracker:getActive(2, 0) end,
+        terrain = terrain,
+    }, 0)
+    assert(dir, "produced direction")
+    -- 威胁在右侧(60,0)，向右走会越走越近（t=8 dist=2, 罚分大），
+    -- 向左走远离+t=24收敛奖励 → 应偏向左侧
+    assert(dir.X < 0, "should prefer left (away from stationary threat), got X=" .. tostring(dir.X))
+end)
+
+check("trajectory: near-term outweighs far-term", function()
+    -- 场景: 两个威胁
+    -- 威胁A: 距玩家60px，静止，t=4 时仍近 → 近期威胁
+    -- 威胁B: 距玩家300px，快速接近，t=24 时才近 → 远期威胁
+    local tracker = Tracker2.create()
+    tracker:update({
+        { index = 1, pos = Vector(60, 0), vel = Vector(0, 0), speed = 0, radius = 8 },  -- 近
+        { index = 2, pos = Vector(400, 0), vel = Vector(-15, 0), speed = 15, radius = 8 }, -- 远但快速接近
+    }, 0, "projectile")
+    local state = {
+        player = { position = Vector(0, 0), velocity = Vector(0, 0), radius = 10,
+                   inputDir = Vector(0, 0) },
+        decision = {}, threat = {},
+    }
+    local terrain = Terrain.create()
+    local cfg = require("config/defaults").get()
+    local dir = Fallback.compute(state, {
+        config = cfg, tracker = tracker,
+        getHazards = function() return tracker:getActive(2, 0) end,
+        terrain = terrain,
+    }, 0)
+    assert(dir, "produced direction")
+    -- 近期威胁在右侧(60,0) → 应偏向左侧或上下逃避
+    assert(dir.X < 0 or math.abs(dir.Y) > 0.5,
+        "should avoid near-term threat, got (" .. tostring(dir.X) .. "," .. tostring(dir.Y) .. ")")
+end)
+
 -- ===== 输出结果 =====
 print("========== SMOKE RESULTS ==========")
 for i = 1, #results do
