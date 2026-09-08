@@ -21,6 +21,14 @@ local mathext = require("utils/math_ext")
 local function weightFor(threatLevel, config, wallDist, inDangerZone)
     local maxW = config.maxDodgeWeight
 
+    -- 嵌墙(wallDist<0): 已在墙壁碰撞体内，跳过墙角钳制全力推离
+    -- （物理碰撞=最极端情况，任何降权都会导致无法脱困）
+    if wallDist < 0 then
+        -- S 曲线仍正常映射，但上限直接为 maxDodgeWeight
+        local t = mathext.remap(threatLevel, config.threatLow, config.threatHigh, 0, 1)
+        return mathext.smoothstep(t) * maxW, maxW
+    end
+
     -- 原则5第二层：靠墙 → 挣脱模式，大幅降权
     if wallDist < config.wallStuckThreshold then
         local cap = config.wallEscapeWeight

@@ -77,6 +77,16 @@ local function scoreCandidate(dir, speed, ctx, withClarity)
     if ctx.terrain.valid then
         local wallDist = ctx.terrain:distanceToWall(playerPos, dir)
         local threshold = ctx.wallPenaltyThreshold
+        -- 嵌墙(wallDistCurrent<0): 已在墙壁碰撞体内
+        -- 非通行方向重罚 + 可通行方向奖励（引导找到逃生通道）
+        if ctx.wallDistCurrent and ctx.wallDistCurrent < 0 then
+            local probe20 = playerPos + dir * 20
+            if not ctx.terrain:isWalkableAt(probe20) then
+                score = score + 2000 -- 嵌墙时朝墙方向：硬拒绝
+            else
+                score = score - 500 -- 嵌墙时可通行方向：大额奖励（引导逃生）
+            end
+        end
         if wallDist < threshold then
             local closeness = 1 - (wallDist / threshold)
             score = score + ctx.wallPenaltyBase * closeness * closeness * 30
@@ -195,6 +205,7 @@ end
 ---           精评结束填 best（最优分）——离线回答"为什么往这躲"
 function Fallback.compute(state, deps, frame, traceOut)
     local player = state.player
+    local playerPos = player.position
     local config = deps.config
     local hazards = deps.getHazards(frame)
     local budgetMs = config.budgetMs or 1.0
@@ -241,14 +252,60 @@ function Fallback.compute(state, deps, frame, traceOut)
     end
     ctx.enemyNearCount = enemyNearCount
 
+    -- 嵌墙紧急覆写：wallDistCurrent < 0 = 玩家已在墙壁碰撞体内
+    -- 探测8方向找可通行逃生路径（不盲目朝房间中心推——狭窄缝隙中该方向可能被阻挡）
+    if ctx.wallDistCurrent and ctx.wallDistCurrent < 0 and ctx.terrain.valid then
+        local bestEscapeDir = nil
+        local bestEscapeScore = -math.huge
+        for i = 1, 8 do
+            local angle = (i - 1) * (2 * math.pi / 8)
+            local dir = Vector(math.cos(angle), math.sin(angle))
+            local probe = playerPos + dir * 30
+            if ctx.terrain:isWalkableAt(probe) then
+                local alignScore = 0
+                if ctx.roomCenter and (ctx.roomCenter - playerPos):Length() > 1 then
+                    alignScore = mathext.dot(dir, (ctx.roomCenter - playerPos):Normalized())
+                end
+                local midProbe = playerPos + dir * 15
+                local midBonus = ctx.terrain:isWalkableAt(midProbe) and 2 or 0
+                local score = alignScore + midBonus
+                if score > bestEscapeScore then
+                    bestEscapeScore = score
+                    bestEscapeDir = dir
+                end
+            end
+        end
+        if bestEscapeDir then
+            state.decision.degraded = false
+            if traceOut then traceOut.best = -9999 end
+            return bestEscapeDir
+        end
+        -- 无路可走：不覆写，让评分流程选最优（可能有微小通道）
+    end
+
     -- ===== 阶段1: 粗评（n方向×1中速，无清晰度）=====
+    -- 近墙时追加自适应方向：在远离墙壁方向附近加密采样（±22.5°偏移），
+    -- 确保直角角落总有一个方向与两面墙都成45°以上夹角
     local coarse = {}
     for i = 1, n do
         local angle = (i - 1) * (2 * math.pi / n)
         local dir = Vector(math.cos(angle), math.sin(angle))
-        -- ang 记录角度（度）：级别4录制直接取，避免 Lua 5.1/5.4 atan 兼容问题
         coarse[i] = { dir = dir, score = scoreCandidate(dir, COARSE_SPEED, ctx, false),
                       ang = (i - 1) * (360 / n) }
+    end
+    -- 近墙自适应追加：wallDist<80px时在朝房间中心方向追加±22.5°偏移候选
+    if ctx.wallDistCurrent and ctx.wallDistCurrent < 80 and ctx.roomCenter then
+        local toCenter = ctx.roomCenter - playerPos
+        if toCenter:Length() > 1 then
+            local centerAngle = math.atan(toCenter.Y, toCenter.X)
+            local offsets = { -math.pi / 8, math.pi / 8, -math.pi / 4, math.pi / 4 }
+            for oi = 1, #offsets do
+                local a = centerAngle + offsets[oi]
+                local dir = Vector(math.cos(a), math.sin(a))
+                coarse[#coarse + 1] = { dir = dir, score = scoreCandidate(dir, COARSE_SPEED, ctx, false),
+                    ang = math.deg(a) % 360 }
+            end
+        end
     end
     -- 粗分排序取 top（n≤16）
     table.sort(coarse, function(a, b) return a.score < b.score end)

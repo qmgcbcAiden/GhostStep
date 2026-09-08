@@ -178,9 +178,16 @@ check("synth: max threat respects 0.85 cap", function()
     assert(out.X < -0.99, "direction=" .. tostring(out.X))
 end)
 
-check("synth: wall escape clamps to 0.3", function()
+check("synth: wall escape clamps to wallEscapeWeight", function()
     local _, w = InputSynthesizer.synthesize(Vector(1, 0), Vector(-1, 0), 1.0, config, 10)
-    assert(w <= 0.3 + 0.0001, "w=" .. tostring(w))
+    -- wallEscapeWeight=0.5（默认值）：靠墙时 AI 权重上限降到 0.5
+    assert(w <= 0.5 + 0.0001, "w=" .. tostring(w))
+end)
+
+check("synth: embedded wall skips clamping (wallDist<0)", function()
+    -- wallDist<0 = 玩家嵌入墙壁碰撞体 → 跳过墙角钳制，全力推离
+    local _, w = InputSynthesizer.synthesize(Vector(0, 0), Vector(1, 0), 1.0, config, -5)
+    assert(math.abs(w - 0.85) < 0.001, "embedded wall w=maxDodgeWeight, got " .. tostring(w))
 end)
 
 check("synth: standing player gets pure dodge", function()
@@ -376,6 +383,42 @@ check("escape lock reset", function()
     -- reset 后无记忆，立即接受新方向
     local dir = el:process(101, function() return Vector(-1, 0) end)
     assert(dir.X < -0.9, "fresh after reset")
+end)
+
+check("escape lock: embedded wall probes terrain for escape", function()
+    local el = EscapeLock.create()
+    -- 先锁定一个朝右方向（正常路径）
+    el:process(100, function() return Vector(1, 0) end)
+    assert(el.lockedDir and el.lockedDir.X > 0.9, "locked right")
+    -- 创建 mock terrain: isWalkableAt 对左侧(540,210)返回true，其余返回false
+    -- 这样探测8方向时只有朝左的方向可通行
+    local mockTerrain = {
+        valid = true,
+        isWalkableAt = function(self, pos)
+            -- 只有左侧30px处(540,210)可通行
+            if pos.X < 550 and pos.Y > 190 and pos.Y < 230 then return true end
+            return false
+        end,
+    }
+    local ctx = { wallDist = -10, roomCenter = Vector(0, 0),
+                  wallStuckThreshold = 60, terrain = mockTerrain }
+    local dir = el:process(101, function() return Vector(1, 0) end, Vector(570, 210), ctx)
+    assert(dir and dir.X < -0.5, "escape toward walkable direction, got X=" .. tostring(dir.X))
+    assert(el.lockedDir == nil, "lock cleared after embedded wall override")
+end)
+
+check("escape lock: embedded wall with no walkable path returns nil", function()
+    local el = EscapeLock.create()
+    el:process(200, function() return Vector(1, 0) end)
+    -- mock terrain: 所有方向都不通行
+    local mockTerrain = {
+        valid = true,
+        isWalkableAt = function(self, pos) return false end,
+    }
+    local ctx = { wallDist = -10, roomCenter = Vector(0, 0),
+                  wallStuckThreshold = 60, terrain = mockTerrain }
+    local dir = el:process(201, function() return Vector(1, 0) end, Vector(570, 210), ctx)
+    assert(dir == nil, "no walkable path -> nil, player controls")
 end)
 
 -- ===== 弧线弹幕预测（三点圆拟合）=====
@@ -967,12 +1010,12 @@ end)
 
 check("synth: wall cap relaxed when in danger zone", function()
     local cfg = require("config/defaults").get()
-    -- 靠墙 + 高威胁：正常钳到 0.3
+    -- 靠墙 + 高威胁：正常钳到 wallEscapeWeight=0.5
     local _, w1 = InputSynthesizer.synthesize(Vector(0, 0), Vector(1, 0), 1.0, cfg, 10)
-    assert(math.abs(w1 - 0.3) < 0.001, "normal wall cap=0.3, got " .. tostring(w1))
-    -- 靠墙 + 高威胁 + 被围（hit=0）：放宽到 0.6（逃命优先）
+    assert(math.abs(w1 - 0.5) < 0.001, "normal wall cap=0.5, got " .. tostring(w1))
+    -- 靠墙 + 高威胁 + 被围（hit=0）：放宽到 min(0.85, 0.5*2)=0.85（逃命优先）
     local _, w2 = InputSynthesizer.synthesize(Vector(0, 0), Vector(1, 0), 1.0, cfg, 10, true)
-    assert(math.abs(w2 - 0.6) < 0.001, "danger zone wall cap=0.6, got " .. tostring(w2))
+    assert(math.abs(w2 - 0.85) < 0.001, "danger zone wall cap=0.85, got " .. tostring(w2))
 end)
 
 check("enemy sensor: fireplace captured with enlarged flame radius", function()

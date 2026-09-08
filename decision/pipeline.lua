@@ -55,10 +55,18 @@ function Pipeline.run(state, deps, frame)
         }
         if deps.escapeLock and EscapeLock.applies(conditions) then
             -- Layer 2: 逃离锁定——站在危险区内，锁定方向往外冲（防抖）
+            -- 传递嵌墙上下文：wallDist<0时紧急覆写为朝房间中心方向
+            local elCtx = {
+                roomCenter = deps.terrain.valid and deps.terrain.topLeft
+                    and (deps.terrain.topLeft + Vector(deps.terrain.sizeX * 20, deps.terrain.sizeY * 20)),
+                wallStuckThreshold = config.wallStuckThreshold,
+                wallDist = state.control.wallDist,
+                terrain = deps.terrain,
+            }
             layer = "escape_lock"
             rawDir = deps.escapeLock:process(frame, function()
                 return Fallback.compute(state, deps, frame, trace)
-            end, state.player.position)
+            end, state.player.position, elCtx)
             if not rawDir then layer = "fallback" end
         elseif EarlyDodge.applies(conditions) then
             -- Layer 1: 单弹幕垂直闪避（快速路径）
