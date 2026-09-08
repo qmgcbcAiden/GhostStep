@@ -86,7 +86,8 @@ function LaserSensor.collect(player, tracker, frame, config)
                             or 400
                     end
                     entries[count] = {
-                        index = e.Index,
+                        index = e.Index, seed = e.InitSeed, entityType = e.Type, variant = e.Variant,
+                        sourceIndex = e.SpawnerEntity and e.SpawnerEntity.Index,
                         pos = e.Position,
                         vel = e.Velocity,
                         speed = e.Velocity:Length(),
@@ -102,7 +103,8 @@ function LaserSensor.collect(player, tracker, frame, config)
                     -- ToLaser 读取失败（API 异常）：仍采集基础条目（威胁检测安全优先），
                     -- 几何退化为 pos 点 + vel 线段由 hazard_query 兜底处理
                     entries[count] = {
-                        index = e.Index,
+                        index = e.Index, seed = e.InitSeed, entityType = e.Type, variant = e.Variant,
+                        sourceIndex = e.SpawnerEntity and e.SpawnerEntity.Index,
                         pos = e.Position,
                         vel = e.Velocity,
                         speed = e.Velocity:Length(),

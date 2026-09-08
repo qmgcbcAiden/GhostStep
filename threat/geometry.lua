@@ -1,0 +1,78 @@
+-- 所有决策共用的时空几何。圆体使用相对运动的连续线段最近点；
+-- 激光使用时段中点线段及端点扫掠上界（保守覆盖一帧内的旋转/平移）。
+local G={}
+local Future=require("threat/future_motion")
+local Predict=require("threat/projectile_predict")
+local function pointSeg(px,py,ax,ay,bx,by)
+    local dx,dy=bx-ax,by-ay
+    local d=dx*dx+dy*dy
+    local t=d>1e-9 and math.max(0,math.min(1,((px-ax)*dx+(py-ay)*dy)/d)) or 0
+    return math.sqrt((px-ax-t*dx)^2+(py-ay-t*dy)^2)
+end
+G.pointSegmentDistance=pointSeg
+function G.window(e,frame)
+    local start=e.appearFrame or (e.fuseFrames and ((e.lastFrame or frame)+e.fuseFrames))
+    return start and start-frame or 0, e.endFrame and e.endFrame-frame or math.huge
+end
+function G.sample(e,t,frame,cache)
+    local k=t
+    if cache and cache[k]~=nil then return cache[k] or nil end
+    -- 运动基准从最后观测外推；生效判断仍基于当前时间。
+    local age=math.max(0,frame-(e.lastFrame or frame))
+    local a,b=Future.pos(e,t+age,e.lastFrame or frame)
+    local v=a and {a.X,a.Y,b and b.X,b and b.Y} or false
+    if cache then cache[k]=v end
+    return v or nil
+end
+function G.prepare(e,frame,horizon)
+    local c={}
+    local age=math.max(0,frame-(e.lastFrame or frame))
+    c.start,c.ending=G.window(e,frame)
+    c.radius=(e.radius or 0)+(e.uncertainty or 0)
+    c.linear=e.kind~="laser" and not ((e.kind or "projectile")=="projectile"
+        and ((e.historyCount or 0)>=3) and (Predict.isCurved(e) or Predict.isTracking(e)))
+    if c.linear then
+        c.x,c.y=e.pos.X+e.vel.X*age,e.pos.Y+e.vel.Y*age
+        c.vx,c.vy=e.vel.X,e.vel.Y
+        local lo,hi=math.max(0,c.start),math.min(horizon,c.ending)
+        local ax,ay,bx,by=c.x+c.vx*lo,c.y+c.vy*lo,c.x+c.vx*hi,c.y+c.vy*hi
+        c.minX,c.maxX=math.min(ax,bx)-c.radius,math.max(ax,bx)+c.radius
+        c.minY,c.maxY=math.min(ay,by)-c.radius,math.max(ay,by)+c.radius
+    end
+    return c
+end
+function G.clearance(e,ax,ay,bx,by,r,t0,t1,frame,cache)
+    local active,ending
+    if cache and cache.start then active,ending=cache.start,cache.ending else active,ending=G.window(e,frame) end
+    local lo,hi=math.max(t0,active),math.min(t1,ending)
+    if lo>hi then return math.huge end
+    local dt=t1-t0
+    local p0x,p0y,p1x,p1y=ax,ay,bx,by
+    if dt>0 then
+        p0x,p0y=ax+(bx-ax)*(lo-t0)/dt,ay+(by-ay)*(lo-t0)/dt
+        p1x,p1y=ax+(bx-ax)*(hi-t0)/dt,ay+(by-ay)*(hi-t0)/dt
+    end
+    if cache and cache.linear then
+        return pointSeg(0,0,p0x-cache.x-cache.vx*lo,p0y-cache.y-cache.vy*lo,
+            p1x-cache.x-cache.vx*hi,p1y-cache.y-cache.vy*hi)-r-cache.radius
+    end
+    local a,b=G.sample(e,lo,frame,cache),G.sample(e,hi,frame,cache)
+    if not a or not b then return math.huge end
+    local radius=r+(e.radius or 0)+(e.uncertainty or 0)
+    if a[3] then
+        local mid=G.sample(e,(lo+hi)/2,frame,cache)
+        local moveA=math.sqrt((a[1]-b[1])^2+(a[2]-b[2])^2)*0.5
+        local moveB=math.sqrt((a[3]-b[3])^2+(a[4]-b[4])^2)*0.5
+        local sweep=math.max(moveA,moveB)
+        local playerSweep=math.sqrt((p1x-p0x)^2+(p1y-p0y)^2)*0.5
+        return pointSeg((p0x+p1x)/2,(p0y+p1y)/2,mid[1],mid[2],mid[3],mid[4])-radius-sweep-playerSweep
+    end
+    return pointSeg(0,0,p0x-a[1],p0y-a[2],p1x-b[1],p1y-b[2])-radius
+end
+-- 包围可达区域筛选。长激光按长度扩展，不能只拿光源附近的九宫格。
+function G.reachable(e,p,r,speed,horizon)
+    local extent=e.endPos and e.pos:Distance(e.endPos) or (e.length or 0)
+    local reach=r+(e.radius or 0)+(e.uncertainty or 0)+extent+((e.speed or e.vel:Length())+speed)*horizon
+    return e.pos:Distance(p)<=reach
+end
+return G

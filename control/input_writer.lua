@@ -22,25 +22,27 @@ function InputWriter.onInputAction(control, observationMode, entity, inputHook, 
         return nil
     end
     -- 观察模式不干预
-    if observationMode then return nil end
+    if observationMode or control.readingRaw then return nil end
 
     -- 时效保护：决策超过2帧的旧数据不使用
     local frame = Isaac.GetFrameCount()
-    if not control.active or (frame - control.frame) > 2 then return nil end
+    if not control.active or (frame - control.frame) > 2 or frame < control.frame then return nil end
 
     local dir = control.direction
-    if not dir or dir:Length() < 0.01 then return nil end
+    if not dir then return nil end -- 零向量是有效的减速/停止命令。
 
     -- 按轴提取分量（由 input_reader 提供统一的轴值函数）
     local InputReader = require("control/input_reader")
     local value = InputReader.actionValue(action, dir)
 
     if inputHook == InputHook.GET_ACTION_VALUE then
+        control.hookSeen = true
+        control.hookFrame = frame
         return value -- float [0,1]
-    elseif inputHook == InputHook.IS_ACTION_PRESSED
-        or inputHook == InputHook.IS_ACTION_TRIGGERED then
+    elseif inputHook == InputHook.IS_ACTION_PRESSED then
         return value > 0 -- boolean
     end
+    -- 边沿触发留给硬件，避免把持续辅助变成每帧双击/冲刺。
     return nil -- 其他 hook 不拦截
 end
 

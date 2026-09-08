@@ -46,6 +46,7 @@ local function isContactThreat(e)
         return "fireplace"
     end
 
+    if not e.ToNPC then return false end
     local okNpc, npc = pcall(function() return e:ToNPC() end)
     if not okNpc or npc == nil then return false end
 
@@ -95,6 +96,10 @@ function EnemySensor.collect(player, tracker, frame, config)
             end
             entries[count] = {
                 index = e.Index,
+                seed = e.InitSeed,
+                kind = "enemy",
+                entityType = e.Type,
+                variant = e.Variant,
                 pos = e.Position,
                 vel = e.Velocity,
                 speed = e.Velocity:Length(),
@@ -110,7 +115,7 @@ function EnemySensor.collect(player, tracker, frame, config)
     end
 
     -- 诊断：只在敌人数变化时打日志（0→N，N→0），避免刷屏
-    if not _enemyLoggedThisRoom or count ~= (_enemyLastCount or 0) then
+    if config.diagnosticsEnabled and (not _enemyLoggedThisRoom or count ~= (_enemyLastCount or 0)) then
         Isaac.DebugString(string.format(
             "[GhostStep3] 敌人采集: GetRoomEntities=%d 接触威胁=%d 帧=%d",
             #entities, count, frame))

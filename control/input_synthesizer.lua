@@ -1,7 +1,7 @@
 -- control/input_synthesizer.lua
--- ★ 叠加偏移合成（核心创新，4.2/4.5节）
+-- 旧输入合成接口的兼容实现；当前主控制器直接选择最终输入。
 --
---   output = normalize(P * (1-w) + D * w)
+--   output = clamp_length(P * (1-w) + D * w, 1)
 --
 --   P = 玩家输入方向, D = AI闪避方向, w = S曲线映射的权重
 --   硬约束:
@@ -69,14 +69,9 @@ function InputSynthesizer.synthesize(playerInput, dodgeDir, threatLevel, config,
     -- 合成（4.2公式）
     local combined = P * (1 - w) + D * w
 
-    -- 归一化保持移动速度
-    -- 站立时(P=0) 输出 AI 方向满速；有输入时输出方向归一化（力度=1）
+    -- 仅限制最大幅度；小幅移动和抵消后的零向量必须保留。
     local len = combined:Length()
-    if len > 0.01 then
-        combined = combined:Normalized()
-    else
-        combined = D
-    end
+    if len > 1 then combined = combined / len end
 
     return combined, w
 end

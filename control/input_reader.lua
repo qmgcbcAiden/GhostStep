@@ -15,7 +15,16 @@ function InputReader.isMoveAction(action)
 end
 
 --- 方向 → 轴值（7.5.1）。含死区处理
-local DEADZONE = 0.2
+local DEADZONE = 0.01
+
+-- 规划与 hook 使用同一限幅/死区；绝不把小幅输入归一化成满速。
+function InputReader.executable(dir)
+    local x = math.abs(dir.X) > DEADZONE and dir.X or 0
+    local y = math.abs(dir.Y) > DEADZONE and dir.Y or 0
+    local len = math.sqrt(x * x + y * y)
+    if len > 1 then x, y = x / len, y / len end
+    return Vector(x, y)
+end
 function InputReader.actionValue(action, dir)
     local x, y = dir.X, dir.Y
     if action == ButtonAction.ACTION_LEFT then

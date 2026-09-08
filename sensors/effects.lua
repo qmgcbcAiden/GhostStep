@@ -68,11 +68,6 @@ end
 
 --- 采集当帧威胁效果并喂给追踪器
 function EffectSensor.collect(player, tracker, frame, config)
-    if not config.hazardCreep then
-        if tracker.count > 0 then tracker:clear() end
-        return
-    end
-
     local okFind, entities = pcall(Isaac.FindByType, EntityType.ENTITY_EFFECT, -1, -1, false)
     if not okFind or entities == nil then return end
 
@@ -83,7 +78,12 @@ function EffectSensor.collect(player, tracker, frame, config)
         local variant = safeGet(e, function(x) return x.Variant end, -1)
         -- 伤害值（auto_dodge 模式: effect.CollisionDamage or entity.CollisionDamage or 0）
         local damage = safeGet(e, function(x) return x.CollisionDamage or 0 end, 0)
-        if isThreatEffect(variant) or damage > 0 then
+        local creep=CREEP_VARIANTS[variant]
+        local playerOwned=e.SpawnerType==EntityType.ENTITY_PLAYER or e.SpawnerType==EntityType.ENTITY_FAMILIAR
+        local immuneGround=creep and player and player.canFly
+        local enabled=not creep or config.hazardCreep
+        if enabled and not immuneGround and not (creep and playerOwned)
+            and (isThreatEffect(variant) or damage > 0) then
             -- 兜底：未分类 variant 但带 CollisionDamage 的效果也算威胁
             -- （"Killed by (10.1)" 类爆炸特效就在这层被接住，避免漏判）
             local isDead = safeGet(e, function(x) return x:IsDead() end, true)
@@ -95,7 +95,8 @@ function EffectSensor.collect(player, tracker, frame, config)
                     radius = math.max(radius, DEFAULT_RADIUS)
                 end
                 entries[count] = {
-                    index = e.Index,
+                    index = e.Index, seed = e.InitSeed, entityType = e.Type, variant = e.Variant,
+                        sourceIndex = e.SpawnerEntity and e.SpawnerEntity.Index,
                     pos = e.Position,
                     vel = e.Velocity,
                     speed = e.Velocity:Length(),

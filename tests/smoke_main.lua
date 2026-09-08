@@ -175,7 +175,7 @@ check("synth: max threat respects 0.85 cap", function()
     local out, w = InputSynthesizer.synthesize(Vector(1, 0), Vector(-1, 0), 1.0, config, 999)
     assert(w <= 0.85 + 0.0001, "w=" .. tostring(w))
     -- P=(1,0) w=0.85 D=(-1,0): combined = 0.15*(1,0) + 0.85*(-1,0) = (-0.7, 0) → 归一化(-1,0)
-    assert(out.X < -0.99, "direction=" .. tostring(out.X))
+    assert(math.abs(out.X+0.7)<0.001, "preserve blend amplitude=" .. tostring(out.X))
 end)
 
 check("synth: wall escape clamps to wallEscapeWeight", function()
@@ -193,7 +193,7 @@ end)
 check("synth: standing player gets pure dodge", function()
     local out, w = InputSynthesizer.synthesize(Vector(0, 0), Vector(0, 1), 0.9, config, 999)
     assert(w > 0, "weight")
-    assert(out.Y > 0.99, "pushed down: " .. tostring(out.Y))
+    assert(math.abs(out.Y-w)<0.001, "standing input preserves weight: " .. tostring(out.Y))
 end)
 
 check("synth: partial threat partial weight", function()
@@ -209,7 +209,9 @@ check("direction smooth anti-flip", function()
     assert(d1.X > 0.9, "first dir")
     -- 试图翻转到反方向 → 保持期内仍用旧方向
     local d2 = DirectionSmooth.process(decision, config, Vector(-1, 0), 2)
-    assert(d2.X > 0.9, "hold: still right, got " .. tostring(d2.X))
+    assert(d2.X>0 and d2.X<0.9, "smooth transition starts immediately")
+    for f=3,20 do DirectionSmooth.process(decision,config,Vector(-1,0),f) end
+    assert(decision.dodgeDir.X< -0.99, "reversal must converge")
 end)
 
 -- ===== fallback =====
@@ -247,7 +249,7 @@ end)
 
 -- ===== pipeline end-to-end =====
 local Pipeline = require("decision/pipeline")
-check("pipeline: gradient layer at low-mid threat", function()
+check("pipeline: safe stationary player does not drift from density", function()
     local tracker = Tracker2.create()
     tracker:update({
         { index = 1, pos = Vector(70, 0), vel = Vector(0, 0), speed = 0, radius = 8 },
@@ -265,8 +267,7 @@ check("pipeline: gradient layer at low-mid threat", function()
     local layer, dir = Pipeline.run(state, {
         config = config, tracker = tracker, hazardQuery = hq, terrain = Terrain.create(),
     }, 0)
-    assert(layer == "gradient", "layer=" .. tostring(layer))
-    assert(dir.X < -0.5, "moves away from cluster")
+    assert(layer == "none" and dir==nil, "safe input passes through")
 end)
 
 check("pipeline: none layer when safe", function()
@@ -305,7 +306,7 @@ end)
 local InputReader = require("control/input_reader")
 check("input reader axis values", function()
     assert(InputReader.actionValue(0, Vector(-0.5, 0)) == 0.5, "left half")
-    assert(InputReader.actionValue(0, Vector(-0.1, 0)) == 0, "deadzone")
+    assert(InputReader.actionValue(0, Vector(-0.001, 0)) == 0, "deadzone")
     assert(InputReader.actionValue(1, Vector(1, 0)) == 1, "right full")
     assert(InputReader.actionValue(2, Vector(0, -0.7)) == 0.7, "up")
 end)
@@ -708,7 +709,7 @@ check("laser sensor filters hostile vs friendly", function()
     SMOKE.entities = {}
 end)
 
-check("bomb sensor filters by fuse time", function()
+check("bomb sensor keeps unknown fuse as explicitly unknown", function()
     local trk = Tracker.create()
     -- 玩家炸弹跳过
     SMOKE.entities = {
@@ -720,9 +721,9 @@ check("bomb sensor filters by fuse time", function()
           IsDead = function() return false end },
     }
     BombSensor.collect(nil, trk, 10, { hazardBombs = true })
-    assert(trk.count == 1, "fuse filter: count=" .. trk.count)
+    assert(trk.count == 2, "both bombs tracked; fuse availability explicit")
     assert(trk.tracked[810], "mature bomb tracked")
-    assert(not trk.tracked[811], "immature bomb skipped")
+    assert(trk.tracked[811].timingKnown==false and trk.tracked[811].fuseFrames==nil, "FrameCount cannot establish fuse time")
     SMOKE.entities = {}
 end)
 
@@ -747,7 +748,7 @@ end)
 check("hazard_query routes laser by segment distance", function()
     -- 激光水平从左到右，玩家在激光上方近距离
     local hz = {
-        { index = 1, pos = Vector(0, 10), vel = Vector(100, 0), speed = 0,
+        { index = 1, pos = Vector(0, 10), endPos = Vector(100,10), vel = Vector(0, 0), speed = 0,
           radius = 5, kind = "laser" },
     }
     local hq = HazardQuery.create()
@@ -801,7 +802,7 @@ check("npc_attack sensor detects Horf attack windup", function()
             GetSprite = function() return { GetAnimation = function() return "Attack" end } end }),
     }
     NpcAttackSensor.collect(nil, trk, 10, { hazardNpcAttacks = true })
-    assert(trk.count == 1, "horf attack detected")
+    assert(trk.count == 0, "missing target is unknown; do not invent an aiming direction")
     SMOKE.entities = {}
 end)
 
@@ -814,7 +815,7 @@ check("npc_attack sensor detects laser windup (Vis/Brimstone)", function()
             GetSprite = function() return { GetAnimation = function() return "Death" end } end }),
     }
     NpcAttackSensor.collect(nil, trk, 10, { hazardNpcAttacks = true })
-    assert(trk.count == 1, "laser windup detected, death excluded: count=" .. trk.count)
+    assert(trk.count == 0, "target unavailable; death excluded")
     SMOKE.entities = {}
 end)
 
@@ -869,7 +870,7 @@ check("npc_attack laser windup generates laser kind with endPos", function()
     -- endPos should be along direction from (50,0) toward (200,0), length480
     -- direction = (1,0), endPos = (50,0) + (1,0)*480 = (530,0)
     -- vel = direction * pathLength = (480,0) (vel carries endPos offset)
-    assert(entry.vel.X > 400, "vel.X should be ~480 (endPos offset), got " .. tostring(entry.vel.X))
+    assert(entry.vel:Length()==0 and entry.endPos.X==530, "beam length must not become translation speed")
     -- fuseFrames: windup=22, GetFrame=0 → fuse=22
     assert(entry.fuseFrames == 22, "fuseFrames=22-0=22, got " .. tostring(entry.fuseFrames))
     SMOKE.entities = {}
@@ -916,7 +917,7 @@ check("damage weighting: high damage raises urgency (3.6)", function()
 end)
 
 check("wall truncation: projectile behind wall is not a threat (3.5)", function()
-    local hz = { { index = 1, pos = Vector(0, 0), vel = Vector(3, 0), speed = 3, radius = 5 } }
+    local hz = { { index = 1, kind="projectile", blocksOnGrid=true, pos = Vector(0, 0), vel = Vector(3, 0), speed = 3, radius = 5 } }
     local hq = HazardQuery.create()
     hq:update(hz)
     local ter = walledTerrain()

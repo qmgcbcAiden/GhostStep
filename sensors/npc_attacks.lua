@@ -72,68 +72,38 @@ end
 --- Build tracker entry from attack detection
 --- Returns {pos, vel, speed, radius, kind, fuseFrames?, appearFrame?, ...} or nil
 local function buildEntry(entity, attackEntry, frame)
-    local cat = attackEntry.category
-    local profile = Profiles.categories[cat]
+    local cat=attackEntry.category
+    local profile=Profiles.categories[cat]
     if not profile then return nil end
-
-    local pos = entity.Position
-    local kind = profile.kind
-    local radius
-    local vel = Vector(0, 0)
-    local speed = 0
-
-    if cat == "stomping" then
-        radius = profile.radius
-
-    elseif cat == "jumping" then
-        radius = getJumpRadius(entity.Type)
-        if profile.velScale and profile.velScale > 0 then
-            vel = entity.Velocity * profile.velScale
-            speed = vel:Length()
+    local okFrame,animFrame=pcall(function() return entity:GetSprite():GetFrame() end)
+    animFrame=okFrame and type(animFrame)=="number" and animFrame or 0
+    local remaining=math.max(0,(attackEntry.windupFrames or 0)-animFrame)
+    local entry={index=entity.Index+10000,seed=entity.InitSeed,sourceIndex=entity.Index,
+        entityType=entity.Type,variant=entity.Variant,kind=profile.kind,
+        pos=entity.Position,vel=Vector(0,0),speed=0,radius=profile.radius or getJumpRadius(entity.Type),
+        fuseFrames=remaining,appearFrame=frame+remaining,
+        endFrame=frame+math.max(1,(attackEntry.totalFrames or animFrame+6)-animFrame),
+        predicted=true,animation=attackEntry.name,animationFrame=animFrame,
+        rule=tostring(entity.Type)..":"..tostring(entity.Variant or 0)..":"..attackEntry.name,
+        confidence=0.55,uncertainty=3}
+    if cat=="jumping" then
+        -- 落点按剩余前摇外推；着地后不继续漂移。记录模型来源供实机校准。
+        entry.pos=entity.Position+entity.Velocity*(profile.velScale or 0)*remaining
+    elseif cat=="laser" or cat=="ranged" then
+        local name=string.lower(attackEntry.name)
+        local dir
+        for token,v in pairs({up=Vector(0,-1),down=Vector(0,1),left=Vector(-1,0),right=Vector(1,0)}) do
+            if string.find(name,token,1,true) then dir=v; entry.confidence=0.75; break end
         end
-
-    elseif cat == "laser" or cat == "ranged" then
-        radius = profile.radius
-        -- Direction: NPC -> player (laser fires toward player)
-        local playerPos = getPlayerPosition()
-        if playerPos then
-            local delta = playerPos - pos
-            if delta:Length() > 1 then
-                vel = delta:Normalized() * (profile.pathLength or 480)
-            end
+        if not dir then
+            local target=getPlayerPosition()
+            if not target then return nil end
+            dir=(target-entry.pos):Normalized()
         end
+        entry.length=profile.pathLength or 480
+        entry.endPos=entry.pos+dir*entry.length
+        entry.targetMode=entry.confidence>0.6 and "animation_direction" or "player_estimate"
     end
-
-    -- Tier 1 fields: fuseFrames and appearFrame
-    -- fuseFrames: frames until the attack lands (windupFrames - already played)
-    -- appearFrame: absolute frame when the threat becomes real
-    -- NOTE: for npc_attack kind, future_motion uses appearFrame to determine existence
-    -- NOTE: for laser kind, the entry is immediately active (no fuse delay in collision)
-    local entry = {
-        pos = pos,
-        vel = vel,
-        speed = speed,
-        radius = radius,
-        kind = kind,
-    }
-
-    -- Windup countdown (fuse): how many frames until the attack hits
-    -- attackEntry.windupFrames = total windup frames for this animation
-    -- entity:GetSprite():GetFrame() = current frame within animation (0-indexed)
-    local okFrame, animFrame = pcall(function()
-        return entity:GetSprite():GetFrame()
-    end)
-    if okFrame and type(animFrame) == "number" then
-        local remaining = attackEntry.windupFrames - animFrame
-        if remaining > 0 then
-            entry.fuseFrames = remaining
-            -- appearFrame for npc_attack kind (future_motion skips before this)
-            if kind == "npc_attack" then
-                entry.appearFrame = frame + remaining
-            end
-        end
-    end
-
     return entry
 end
 
@@ -160,7 +130,7 @@ function NpcAttackSensor.collect(player, tracker, frame, config)
     for i = 1, #entities do
         local e = entities[i]
         local okNpc, isNpc = pcall(function()
-            return e:ToNPC() ~= nil and e:IsActiveEnemy() and not e:IsDead()
+            return e.ToNPC ~= nil and e:ToNPC() ~= nil and e:IsActiveEnemy() and not e:IsDead()
                 and not e:HasEntityFlags(EntityFlag.FLAG_FRIENDLY)
         end)
         if okNpc and isNpc then
@@ -171,23 +141,19 @@ function NpcAttackSensor.collect(player, tracker, frame, config)
                     local okBuild, entry = pcall(buildEntry, e, attackEntry, frame)
                     if okBuild and entry then
                         count = count + 1
-                        entries[count] = {
-                            index = e.Index + 10000, -- offset to avoid collision with entity Index
-                            pos = entry.pos,
-                            vel = entry.vel,
-                            speed = entry.speed,
-                            radius = entry.radius,
-                            kind = entry.kind,
-                            -- Tier 1 fields (transparent passthrough to tracker)
-                            fuseFrames = entry.fuseFrames,
-                            appearFrame = entry.appearFrame,
-                        }
+                        entries[count] = entry
                     end
                 end
             end
         end
     end
 
+    -- 动画结束即撤销旧前兆，避免历史预测继续制造虚假危险。
+    local seen={}
+    for i=1,#entries do seen[entries[i].index]=true end
+    for index in pairs(tracker.tracked) do
+        if not seen[index] then tracker.tracked[index]=nil; tracker.count=tracker.count-1 end
+    end
     tracker:update(entries, frame, "npc_attack")
 end
 

@@ -84,7 +84,7 @@ function Overlay.renderWeight(state)
     local w = state.control.weight
     local layer = state.decision.layer
     local x, y = 30, Isaac.GetScreenHeight() - 26
-    local label = string.format("AI %.0f%% [%s]", w * 100, layer)
+    local label = string.format("Assist %.0f%% [%s]", w * 100, layer)
     local alpha = w > 0 and 0.95 or 0.4
     Isaac.RenderText(label, x, y, 0.9, 0.9, 0.3, alpha)
 end

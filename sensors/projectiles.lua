@@ -4,6 +4,7 @@
 -- 所有 entity 访问均 pcall 包裹防崩溃
 
 local ProjectileSensor = {}
+local Priority = require("threat/priority")
 
 local EntityType = EntityType
 local playerType = EntityType.ENTITY_PLAYER
@@ -18,7 +19,7 @@ local function hasNpcOwnerInChain(entity, depth)
     local t = entity.Type
     if t == playerType or t == familiarType then return false end -- 玩家/跟班不是NPC
     local ok, result = pcall(function()
-        return entity:ToNPC() ~= nil or (entity.IsEnemy ~= nil and entity:IsEnemy())
+        return (entity.ToNPC ~= nil and entity:ToNPC() ~= nil) or (entity.IsEnemy ~= nil and entity:IsEnemy())
     end)
     if ok and result == true then return true end
     -- 递归向上：Parent → ParentNPC → SpawnerEntity
@@ -32,7 +33,7 @@ end
 local function classify(proj, frame, cacheTtl)
     local idx = proj.Index
     local cached = ownershipCache[idx]
-    if cached and (frame - cached.frame) < cacheTtl then
+    if cached and cached.seed == proj.InitSeed and (frame - cached.frame) < cacheTtl then
         return cached.hostile
     end
 
@@ -50,11 +51,11 @@ local function classify(proj, frame, cacheTtl)
     end
 
     -- NPC 归属一旦确认不可覆盖为友方
-    if cached and cached.hostile and not hostile then
+    if cached and cached.seed == proj.InitSeed and cached.hostile and not hostile then
         return true
     end
 
-    ownershipCache[idx] = { hostile = hostile, frame = frame }
+    ownershipCache[idx] = { hostile = hostile, frame = frame, seed = proj.InitSeed }
     return hostile
 end
 
@@ -112,13 +113,12 @@ function ProjectileSensor.collect(player, tracker, frame, config)
             tostring(okFind), entities and #entities or 0, frame))
     end
 
-    local entries = {}
+    local entries, heap = {}, {}
     local count = 0
-    local max = config.maxProjectiles
+    local max = math.max(1, config.maxProjectiles or 300)
     local cacheTtl = config.ownershipCacheTtl
 
     for i = 1, #entities do
-        if count >= max then break end
         local proj = entities[i]
 
         local isDead = safeProp(proj, function(e) return e:IsDead() end, true)
@@ -126,8 +126,11 @@ function ProjectileSensor.collect(player, tracker, frame, config)
             local okClass, hostile = pcall(classify, proj, frame, cacheTtl)
             if okClass and hostile then
                 count = count + 1
-                entries[count] = {
+                local entry = {
+                    kind = "projectile", seed = proj.InitSeed,
+                    entityType = proj.Type, variant = proj.Variant,
                     index = proj.Index,
+                        sourceIndex = proj.SpawnerEntity and proj.SpawnerEntity.Index,
                     pos = proj.Position,
                     vel = proj.Velocity,
                     speed = proj.Velocity:Length(),
@@ -135,12 +138,15 @@ function ProjectileSensor.collect(player, tracker, frame, config)
                     -- 伤害值（auto_dodge 模式: projectile.Damage 优先，CollisionDamage 兜底）
                     damage = safeProp(proj, function(p) return p.Damage or p.CollisionDamage or 1 end, 1),
                 }
+                Priority.offer(heap, entry, Priority.projectileKey(entry, player, config.plannerHorizon or 18), max)
             end
         end
     end
 
+    for i=1,#heap do entries[i]=heap[i].value end
+    tracker.observedCount, tracker.omittedCount = count, math.max(0,count-#entries)
     -- 弹幕结果：只在首次检测到/数量变化时打，避免刷屏
-    if count ~= (_projLastCount or 0) then
+    if config.diagnosticsEnabled and count ~= (_projLastCount or 0) then
         Isaac.DebugString(string.format(
             "[GhostStep3] 弹幕结果: FindByType=%s 总=%d 敌方=%d",
             tostring(okFind), #entities, count))

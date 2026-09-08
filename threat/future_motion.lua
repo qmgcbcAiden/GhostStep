@@ -1,3 +1,4 @@
+local History = require("entities/tracker")
 -- threat/future_motion.lua
 -- 统一未来位置外推器：按 entry.kind 路由运动模型
 -- Tier 1 核心：让轨迹评分"看见"不同运动模式的威胁在未来的位置
@@ -70,7 +71,7 @@ local function getArcParams(entry, frame)
     if entry.history and entry.historyCount and entry.historyCount >= 3 then
         local h = entry.history
         local n = entry.historyCount
-        circle = fitCircle3(h[n - 2], h[n - 1], h[n])
+        circle = fitCircle3(History.recent(entry,2), History.recent(entry,1), History.recent(entry,0))
         if circle and math.abs(circle.omega) < 0.02 then
             circle = nil -- 角速度太低视为直线
         end
@@ -109,7 +110,7 @@ function FutureMotion.laserSegmentAt(entry, t)
     if entry.endPos then
         b = entry.endPos + entry.vel * t
     elseif (entry.length or 0) > 0 then
-        local ang = math.rad((entry.angle or 0) + (entry.rotSpd or 0) * t)
+        local ang = math.rad(entry.angle or 0)
         b = a + Vector(math.cos(ang) * entry.length, math.sin(ang) * entry.length)
     else
         b = entry.pos + entry.vel
@@ -133,8 +134,8 @@ local function trackingPos(entry, t)
     if entry.history and entry.historyCount and entry.historyCount >= 2 then
         local h = entry.history
         local n = entry.historyCount
-        local avgVelX = (h[n - 1].vel.X + h[n].vel.X) / 2
-        local avgVelY = (h[n - 1].vel.Y + h[n].vel.Y) / 2
+        local avgVelX = (History.recent(entry,1).vel.X + History.recent(entry,0).vel.X) / 2
+        local avgVelY = (History.recent(entry,1).vel.Y + History.recent(entry,0).vel.Y) / 2
         return Vector(entry.pos.X + avgVelX * t, entry.pos.Y + avgVelY * t)
     end
     return entry.pos + entry.vel * t
@@ -148,6 +149,10 @@ end
 ---------------------------------------------------------------
 function FutureMotion.pos(entry, t, frame)
     local kind = entry.kind or "projectile"
+    local now = frame or entry.lastFrame or 0
+    local start = entry.appearFrame or (entry.fuseFrames and ((entry.lastFrame or now)+entry.fuseFrames))
+    if start and now+t < start then return nil end
+    if entry.endFrame and now+t > entry.endFrame then return nil end
 
     -- 激光: 返回线段两端
     if kind == "laser" then

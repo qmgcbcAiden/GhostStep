@@ -24,6 +24,15 @@ local KIND_CODE = {
 function Snapshot.capture(state, frame, detailLevel)
     local snap = {
         frame = frame,
+        schemaVersion = 2,
+        tick = state.logicTick,
+        decisionId = state.logicTick,
+        phase = "post_player_update",
+        enabled = state.config and state.config.enabled and state.userEnabled,
+        observation = state.config and state.config.observationMode,
+        radius = state.player.radius,
+        controlsEnabled = state.player.controlsEnabled,
+        detail = detailLevel,
         room = state.currentRoomIndex,
     }
 
@@ -57,6 +66,21 @@ function Snapshot.finalize(snap, state, detailLevel, hazards, config)
     local decision = state.decision
     local control = state.control
 
+    snap.budgetMs = decision.usedBudgetMs
+    snap.active = control.active
+    snap.commandValid = control.active
+    snap.reason = decision.reason
+    snap.feedback = state.feedback
+    snap.metrics = decision.metrics
+    snap.cx, snap.cy = control.direction.X, control.direction.Y
+    snap.perfPrevious = state.profiler.previous
+    snap.stages = state.profiler.stages
+    if state.sessionRecorder then
+        snap.recordQueueBytes = state.sessionRecorder.queuedBytes
+        snap.recordDropped = state.sessionRecorder.dropped
+        snap.recordError = state.sessionRecorder.lastError
+    end
+    if state.motion then snap.model={a=state.motion.a,b=state.motion.b,samples=state.motion.samples,error=state.motion.error} end
     if detailLevel >= 1 then
         snap.threat = threat.level
     end
@@ -99,48 +123,46 @@ function Snapshot.finalize(snap, state, detailLevel, hazards, config)
         snap.holdFrames = decision.holdFramesLeft
     end
     if detailLevel >= 4 then
-        -- 逐威胁明细: 距离升序前 N 个、相对玩家坐标（离线重建弹幕场/可视化/
-        -- 未来离线重算的基础数据）。条目为紧凑数组:
-        --   { kind代号, variant, rx, ry, vx, vy, radius, damage }
-        if hazards and config then
-            local px, py = player.position.X, player.position.Y
-            local maxN = config.traceHazardMax or 16
-            local range = config.traceHazardRadius or 300
-            local list = {}
-            for i = 1, #hazards do
-                local h = hazards[i]
-                if h.pos and h.vel then
-                    local dx = h.pos.X - px
-                    local dy = h.pos.Y - py
-                    local dist = math.sqrt(dx * dx + dy * dy)
-                    if dist <= range then
-                        list[#list + 1] = { dist, h, dx, dy }
-                    end
-                end
-            end
-            table.sort(list, function(a, b) return a[1] < b[1] end)
-            local hz = {}
-            local n = math.min(#list, maxN)
-            for i = 1, n do
-                local e = list[i]
-                local h = e[2]
-                hz[i] = {
-                    KIND_CODE[h.kind] or "?",
-                    h.variant or -1,
-                    e[3], e[4],
-                    h.vel.X, h.vel.Y,
-                    h.radius or 0,
-                    h.damage or 1,
-                }
-            end
-            snap.hz = hz
+        local source=decision.hazards or hazards or {}
+        if not decision.hazards then
+            local ordered={}
+            for i=1,#source do ordered[i]=source[i] end
+            table.sort(ordered,function(a,b) return a.pos:Distance(player.position)<b.pos:Distance(player.position) end)
+            source=ordered
         end
-        -- 候选评分（决策透明度: 为什么往这躲、其他候选分多少）
-        local trace = decision.lastTrace
-        if trace and trace.cand then
-            snap.cand = trace.cand
-            snap.bestScore = trace.best
+        -- 先保留候选实际碰撞过的对象，再补其他近场威胁。
+        local wanted,prioritized,seen={},{},{}
+        local plan=decision.lastTrace
+        if plan and plan.candidates then
+            for _,c in ipairs(plan.candidates) do if c.hitId then wanted[c.hitId]=true end end
         end
+        for i=1,#source do if source[i].id and wanted[source[i].id] then prioritized[#prioritized+1]=source[i];seen[source[i]]=true end end
+        for i=1,#source do if not seen[source[i]] then prioritized[#prioritized+1]=source[i] end end
+        source=prioritized
+        local maxN=(config and config.traceHazardMax) or 16
+        local hz,objects={},{}
+        for i=1,math.min(#source,maxN) do
+            local h=source[i]
+            hz[i]={KIND_CODE[h.kind] or "p",h.variant or -1,h.pos.X-player.position.X,h.pos.Y-player.position.Y,
+                h.vel.X,h.vel.Y,h.radius or 0,h.damage or 1}
+            objects[i]={id=h.id,index=h.index,seed=h.seed,kind=h.kind,sourceIndex=h.sourceIndex,
+                x=h.pos.X,y=h.pos.Y,vx=h.vel.X,vy=h.vel.Y,r=h.radius,
+                ex=h.endPos and h.endPos.X,ey=h.endPos and h.endPos.Y,length=h.length,angle=h.angle,rotSpd=h.rotSpd,
+                appearFrame=h.appearFrame,endFrame=h.endFrame,fuseFrames=h.fuseFrames,lastFrame=h.lastFrame,
+                predicted=h.predicted,confidence=h.confidence,uncertainty=h.uncertainty,rule=h.rule,animationFrame=h.animationFrame}
+            local History=require("entities/tracker")
+            local history={}
+            for offset=2,0,-1 do
+                local sample=History.recent(h,offset)
+                if sample then history[#history+1]={sample.frame,sample.pos.X,sample.pos.Y,sample.vel.X,sample.vel.Y} end
+            end
+            objects[i].history=history
+        end
+        snap.hz,snap.hazards=hz,objects
+        snap.hazardTotal=#source; snap.hazardOmitted=math.max(0,#source-#objects)
+        snap.plan=decision.lastTrace
+        if decision.lastTrace then snap.cand=decision.lastTrace.cand; snap.bestScore=decision.lastTrace.best end
+
     end
 
     return snap
