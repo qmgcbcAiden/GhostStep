@@ -1,0 +1,109 @@
+-- sensors/effects.lua
+-- 水坑/火焰/冲击波威胁采集（Phase 3.3）
+-- 效果 = 静态或移动的区域威胁，按 EffectVariant 分类
+-- 分类表移植自 auto_dodge_helper 的验证实现（社区成熟的 variant 枚举）
+-- 黑名单：视觉特效（poof/尘云等）不算威胁
+
+local EffectSensor = {}
+
+local EntityType = EntityType
+local EffectVariant = EffectVariant
+
+-- ===== 威胁分类表（EffectVariant 枚举，来自 auto_dodge 验证实现）=====
+
+-- creep 水坑：持续地面伤害，静态危险圆
+local CREEP_VARIANTS = {
+    [EffectVariant.CREEP_RED] = true,     -- 22
+    [EffectVariant.CREEP_GREEN] = true,   -- 23
+    [EffectVariant.CREEP_YELLOW] = true,  -- 24
+    [EffectVariant.CREEP_WHITE] = true,   -- 25
+    [EffectVariant.CREEP_BLACK] = true,   -- 26
+    [EffectVariant.CREEP_BROWN] = true,   -- 56
+}
+
+-- 火焰：静态危险圆
+local FIRE_VARIANTS = {
+    [51] = true, -- HOT_BOMB_FIRE
+    [52] = true, -- RED_CANDLE_FLAME
+}
+
+-- 冲击波：有路径的移动威胁
+local SHOCKWAVE_VARIANTS = {
+    [61] = true, -- SHOCKWAVE
+    [67] = true, -- SHOCKWAVE_DIRECTIONAL
+    [72] = true, -- CRACKWAVE
+}
+
+-- Boss 落点：扩大中的圆（妈妈的手/脚等）
+local IMPACT_VARIANTS = {
+    [29] = true, -- MOM_FOOT_STOMP
+    [30] = true, -- TARGET
+    [31] = true, -- ROCKET
+    [91] = true, -- MOMS_HAND
+}
+
+-- 默认危险半径（像素）—— creep/火焰用 Size，冲击波/落点用这个
+local DEFAULT_RADIUS = 26
+
+-- 视觉特效黑名单（不是威胁，排除采集）
+local VISUAL_BLACKLIST = {
+    [11] = true, -- BULLET_POOF
+    [12] = true, -- TEAR_POOF_A
+    [18] = true, -- BOMB_CRATER
+    [59] = true, -- DUST_CLOUD
+}
+
+--- 是否为威胁效果
+local function isThreatEffect(variant)
+    if VISUAL_BLACKLIST[variant] then return false end
+    return CREEP_VARIANTS[variant] or FIRE_VARIANTS[variant]
+        or SHOCKWAVE_VARIANTS[variant] or IMPACT_VARIANTS[variant]
+end
+
+local function safeGet(entity, getter, fallback)
+    local ok, v = pcall(getter, entity)
+    if ok and v ~= nil then return v end
+    return fallback
+end
+
+--- 采集当帧威胁效果并喂给追踪器
+function EffectSensor.collect(player, tracker, frame, config)
+    if not config.hazardCreep then
+        if tracker.count > 0 then tracker:clear() end
+        return
+    end
+
+    local okFind, entities = pcall(Isaac.FindByType, EntityType.ENTITY_EFFECT, -1, -1, false)
+    if not okFind or entities == nil then return end
+
+    local entries = {}
+    local count = 0
+    for i = 1, #entities do
+        local e = entities[i]
+        local variant = safeGet(e, function(x) return x.Variant end, -1)
+        if isThreatEffect(variant) then
+            local isDead = safeGet(e, function(x) return x:IsDead() end, true)
+            if not isDead then
+                count = count + 1
+                -- 半径：优先用 Size（creep/火焰适配），冲击波/落点用默认半径
+                local radius = safeGet(e, function(x) return x.Size end, DEFAULT_RADIUS)
+                if SHOCKWAVE_VARIANTS[variant] or IMPACT_VARIANTS[variant] then
+                    radius = math.max(radius, DEFAULT_RADIUS)
+                end
+                entries[count] = {
+                    index = e.Index,
+                    pos = e.Position,
+                    vel = e.Velocity,
+                    speed = e.Velocity:Length(),
+                    radius = radius,
+                    kind = "effect",
+                    variant = variant,
+                }
+            end
+        end
+    end
+
+    tracker:update(entries, frame, "effect")
+end
+
+return EffectSensor

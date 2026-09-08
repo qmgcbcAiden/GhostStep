@@ -1,0 +1,16 @@
+# 第三方参考 mod（含旧仓库完整 .git，勿提交）
+references/
+
+# 运行时生成的会话录像数据
+recording/*.jsonl
+
+# Claude Code 本地配置
+.claude/settings.local.json
+
+# 系统杂项文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 日志
+*.log
