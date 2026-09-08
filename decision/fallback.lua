@@ -89,16 +89,20 @@ local function scoreCandidate(dir, speed, ctx, withClarity)
             score = score + 200
         end
         -- 原则5第三层：远离墙壁偏向——如果玩家当前靠墙，奖励朝房间中心走的方向。
-        -- 实测(2026-09-08死亡局)贴墙滑行被两侧夹击而死 → 贴得越近奖励越强(系数×2)
+        -- 贴墙+敌人时奖励大幅加强：敌人封住退路，必须尽快离开墙壁区域
+        -- 实测(2026-09-08死亡局) escape_lock 方向正确但推不动→墙壁逃脱奖励不足
+        -- 奖励基数50 vs 碰撞惩罚180 → 朝房间中心方向获得显著净收益
         if ctx.wallDistCurrent and ctx.wallDistCurrent < ctx.wallStuckThreshold then
             local awayDir = ctx.roomCenter - playerPos
             if awayDir:Length() > 1 then
                 awayDir = awayDir:Normalized()
                 local awayAlign = mathext.dot(dir, awayDir)
                 -- 靠墙越近，远离墙壁的奖励越大；贴墙(<阈值一半)时翻倍
-                local urgency = 1 - (ctx.wallDistCurrent / ctx.wallStuckThreshold)
+                local urgency = math.max(0.3, 1 - (ctx.wallDistCurrent / ctx.wallStuckThreshold))
                 local wallCloseness = ctx.wallDistCurrent < ctx.wallStuckThreshold * 0.5 and 2 or 1
-                score = score - awayAlign * urgency * 15 * wallCloseness -- 负分 = 奖励
+                -- 敌人在场时墙壁逃脱奖励翻倍（每个敌人+50%，最多3倍）
+                local enemyBoost = 1 + math.min((ctx.enemyNearCount or 0) * 0.5, 2)
+                score = score - awayAlign * urgency * 50 * wallCloseness * enemyBoost -- 负分 = 奖励
             end
         end
     end
@@ -229,6 +233,13 @@ function Fallback.compute(state, deps, frame, traceOut)
             and (deps.terrain.topLeft + Vector(deps.terrain.sizeX * 20, deps.terrain.sizeY * 20))
             or player.position,
     }
+
+    -- 贴墙+敌人时加大墙壁逃脱奖励（快速计数，O(n) 但 n≤SCAN_RADIUS 过滤后很小）
+    local enemyNearCount = 0
+    for i = 1, #nearHazards do
+        if nearHazards[i].kind == "enemy" then enemyNearCount = enemyNearCount + 1 end
+    end
+    ctx.enemyNearCount = enemyNearCount
 
     -- ===== 阶段1: 粗评（n方向×1中速，无清晰度）=====
     local coarse = {}

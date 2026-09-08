@@ -51,6 +51,7 @@ function Pipeline.run(state, deps, frame)
             framesUntilHit = threat.framesUntilHit >= 0 and threat.framesUntilHit or nil,
             threatLevel = level,
             threatHigh = config.threatHigh,
+            enemyCount = threat.enemyCount or 0,
         }
         if deps.escapeLock and EscapeLock.applies(conditions) then
             -- Layer 2: 逃离锁定——站在危险区内，锁定方向往外冲（防抖）

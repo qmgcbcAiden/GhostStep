@@ -30,16 +30,17 @@ function Defaults.get()
         -- 躲避（算法核心参数）
         ---------------------------------------------------------------
         maxDodgeWeight = 0.85,      -- AI 权重上限（原则2：永不 1.0）
-        threatLow = 0.25,           -- 低威胁阈值：低于此完全不介入
+        threatLow = 0.25,           -- 低威胁阈值：低于此完全不介入（灵敏度联动：高=0.20 平衡=0.25 低=0.31）
         threatMedium = 0.45,        -- 中威胁阈值：提前规避阶段上限
         threatHigh = 0.65,          -- 高威胁阈值：紧急闪避
         threatSensitivity = 2,      -- 威胁感知灵敏度 1低/2平衡/3高（联动上面三个阈值）
         anticipateStrength = 5,     -- 提前规避强度 0-10（弹幕场梯度权重）
         gradientRadius = 120,       -- 弹幕场梯度采样半径（像素）
         gradientBins = 8,           -- 梯度方向 bin 数
+        enemyProximityRadius = 200, -- 敌人接近威胁半径（像素，80→200，覆盖中距离敌人保持AI持续介入）
         wallStuckThreshold = 60,    -- 靠墙判定距离（像素），低于此降权（含房间边界检测）
         wallEscapeSensitivity = 2,  -- 墙角挣脱灵敏度 1低/2中/3高（联动 wallStuckThreshold）
-        wallEscapeWeight = 0.3,     -- 挣脱模式下的 AI 权重上限（原则5）
+        wallEscapeWeight = 0.5,     -- 挣脱模式下的 AI 权重上限（原则5；0.3→0.5，escape_lock提前触发后需更大推力）
         wallPenaltyBase = 1.0,      -- 候选方向墙壁惩罚基数
         wallPenaltyThreshold = 100, -- 墙壁惩罚衰减距离（像素）
         directionSmoothFrames = 3,  -- 方向平滑帧数

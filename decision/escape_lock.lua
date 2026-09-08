@@ -25,11 +25,23 @@ function EscapeLock.create()
     return setmetatable(self, { __index = EscapeLock })
 end
 
---- 是否适用：威胁已达高档且当前帧就命中（站在危险区内）
---- conditions = { framesUntilHit, threatLevel, threatHigh }
+--- 是否适用：两种情况触发逃离锁定
+--- 1. 已被弹幕/敌人覆盖(frame 0 命中)且威胁高档 — 原逻辑
+--- 2. 威胁高档 + 有敌人在场 — 提前锁定逃离方向，不等被打才反应
+---    （实测 2026-09-08: threat 0.65→1.0 仅2帧，frame 0 时才锁已来不及）
+--- conditions = { hazardCount, framesUntilHit, threatLevel, threatHigh, enemyCount }
 function EscapeLock.applies(conditions)
-    return conditions.framesUntilHit == 0
-        and conditions.threatLevel >= conditions.threatHigh
+    -- 已在危险区内（frame 0）：原逻辑
+    if conditions.framesUntilHit == 0
+        and conditions.threatLevel >= conditions.threatHigh then
+        return true
+    end
+    -- 有敌人 + 威胁高档：提前锁定（不等被打）
+    if (conditions.enemyCount or 0) > 0
+        and conditions.threatLevel >= conditions.threatHigh then
+        return true
+    end
+    return false
 end
 
 --- 处理一帧。baseDirFn() 返回当前最优逃离方向（通常为 Fallback.compute）

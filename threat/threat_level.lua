@@ -151,16 +151,45 @@ function ThreatLevel.evaluate(state, deps, frame)
         end
     end
 
+    -- 敌人接近威胁（Phase 3 补丁：敌人在密度场中贡献过低的根因修复）
+    -- 实测 2026-09-08: 敌人在100px外 proximityRadius=80 太小，proximity=0→threat=0.08<阈值
+    -- AI 在弹幕间歇期完全休眠；增大到200px覆盖中距离敌人，保持持续介入
+    local proximityThreat = 0
+    if threat.enemyCount > 0 then
+        local proximityRadius = config.enemyProximityRadius or 200
+        local nearestEnemyDist = math.huge
+        for i = 1, #hazards do
+            local h = hazards[i]
+            if h.kind == "enemy" then
+                local dist = h.pos:Distance(player.position) - (h.radius or 0) - player.radius
+                if dist < nearestEnemyDist then
+                    nearestEnemyDist = dist
+                end
+            end
+        end
+        if nearestEnemyDist < proximityRadius then
+            local closeness = 1 - (math.max(0, nearestEnemyDist) / proximityRadius)
+            -- 线性衰减：@200px=0 @100px=0.5 @50px=0.75 @0px=1.0
+            proximityThreat = closeness * 1.0
+        end
+    end
+
     -- 墙壁+敌人复合威胁：贴墙且附近有敌人时，强制 AI 介入推离墙壁
     -- （卡墙问题的核心修复：单纯靠碰撞检测不够，需要主动远离墙壁）
+    local wallUrgencyBoost = 0
     if deps.terrain.valid and threat.enemyCount > 0 then
         -- deps.wallDist: main 每帧统一算好传入（省一次重复计算）；缺省自行计算
         local wallDist = deps.wallDist
             or deps.terrain:minWallDistance(player.position)
         if wallDist < config.wallStuckThreshold then
+            -- 有敌人时墙壁危险加倍：敌人封住退路，贴墙 = 死胡同
+            -- 实测(2026-09-08死亡局): 贴墙+2敌→wallUrgency仅0.1，AI不介入被磨死；
+            -- 提高倍率：3敌=1x→1.67x, 5敌=3x（上限5x防止误触）
+            local enemyProximityFactor = math.min(threat.enemyCount / 3, 5) -- 5敌=1x, 10敌=2x, 15+敌=3x
             local wallUrgency = mathext.remap(wallDist, 0, config.wallStuckThreshold, 0.5, 0.1)
-            urgency = math.max(urgency, wallUrgency)
-            threat.collisionUrgency = math.max(threat.collisionUrgency, wallUrgency)
+            wallUrgencyBoost = wallUrgency * enemyProximityFactor
+            urgency = math.max(urgency, wallUrgencyBoost)
+            threat.collisionUrgency = math.max(threat.collisionUrgency, wallUrgencyBoost)
         end
     end
 
@@ -168,7 +197,7 @@ function ThreatLevel.evaluate(state, deps, frame)
     -- remap 到 0.3-1.2；此前硬编码 0.7 导致该配置为死参数——挂机站桩被围时
     -- 密度分数不够 0.25 阈值，AI 全程不介入，实测 2026-09-08 站桩 40 帧磨死）
     local densityWeight = mathext.remap(config.anticipateStrength or 5, 0, 10, 0.3, 1.2)
-    threat.level = math.max(urgency, densityScore * densityWeight)
+    threat.level = math.max(urgency, densityScore * densityWeight, proximityThreat)
 
     return threat.level
 end
