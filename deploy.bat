@@ -17,8 +17,10 @@ if not exist "%SRC%\main.lua" (
 )
 
 rem /MIR mirror sync (removes stale files e.g. old tests/)
-rem /XD recordings 递归排除运行时回放数据（/MIR 不会删除 DST 侧该目录）
-rem /XD .git .claude references 排除仓库与参考资料，仅同步 mod 本体
+rem NOTE: keep all comments ASCII-only. UTF-8 Chinese comments get mis-decoded
+rem       by GBK codepage cmd and break into garbage commands ('ferences' bug).
+rem /XD recordings: keep runtime replay data (protects it from /MIR deletion)
+rem /XD .git .claude references: repo/reference dirs are not part of the mod
 robocopy "%SRC%" "%DST%" /MIR /XD tests recordings .git .claude references /XF deploy.bat .gitignore ANALYSIS.md /NFL /NDL /NJH /NJS /NP >nul
 if %ERRORLEVEL% GEQ 8 (
     echo ERROR: robocopy failed with code %ERRORLEVEL%
