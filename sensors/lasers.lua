@@ -1,8 +1,10 @@
 -- sensors/lasers.lua
--- 激光威胁采集（Phase 3.1）
+-- 激光威胁采集（Phase 3.1 + 真几何版）
 -- 激光 = 线段威胁，不同于弹幕的圆威胁
--- 几何模型：起点→终点线段，碰撞 = 点到线段距离 ≤ 激光半径+玩家半径
--- API 来源：auto_dodge_helper 验证过的 EntityLaser 属性（pcall 包裹 GetEndPoint）
+-- 几何模型：起点 Position → 终点 GetEndPoint() 的线段；
+--   旋转激光记录角速度（RotationSpd 优先，LastAngleDegrees 差分兜底），
+--   hazard_query 用角度外推未来帧的扫掠线段
+-- API 全部来自 auto_dodge_helper 验证过的 EntityLaser 属性（pcall 包裹）
 
 local LaserSensor = {}
 
@@ -29,9 +31,11 @@ end
 --- 采集当帧敌方激光并喂给追踪器
 -- 激光的几何信息存储在 entry 的特殊字段：
 --   entry.kind = "laser"
---   entry.pos = 起点
---   entry.vel = 方向×长度（作为终点偏移代理；静态激光vel=0，退化为圆碰撞）
---   entry.radius = 激光宽度/2
+--   entry.pos = 起点（实体 Position）
+--   entry.endPos = 终点（GetEndPoint；读不到时用角度×长度合成）
+--   entry.angle = 当前朝向（度）；entry.rotSpd = 旋转角速度（度/帧）
+--   entry.radius = 激光碰撞宽度半径
+--   entry.vel 仅保留实体速度（移动型激光整体平移用）
 function LaserSensor.collect(player, tracker, frame, config)
     if not config.hazardLasers then
         if tracker.count > 0 then tracker:clear() end
@@ -48,22 +52,69 @@ function LaserSensor.collect(player, tracker, frame, config)
         if isHostileLaser(e) then
             local isDead = safeGet(e, function(x) return x:IsDead() end, true)
             if not isDead then
-                count = count + 1
                 local laser = safeGet(e, function(x) return x:ToLaser() end, nil)
-                local radius = 6 -- 默认宽度/2
+                count = count + 1
                 if laser then
-                    radius = safeGet(laser, function(l) return l.Radius or 6 end, 6)
+                    local radius = safeGet(laser, function(l) return l.Radius or 6 end, 6)
+                    -- 终点：GetEndPoint 优先，EndPoint 属性兜底
+                    local endPos = safeGet(laser, function(l) return l:GetEndPoint() end, nil)
+                    if endPos == nil then
+                        endPos = safeGet(laser, function(l) return l.EndPoint end, nil)
+                    end
+                    -- 朝向/角速度（度）。RotationSpd 直接读；读不到用相邻帧角度差分（LastAngleDegrees）
+                    local angle = safeGet(laser, function(l) return l.AngleDegrees end, nil)
+                    if angle == nil then
+                        angle = safeGet(laser, function(l) return l.RotationDegrees end, 0)
+                    end
+                    local rotSpd = safeGet(laser, function(l) return l.RotationSpd end, nil)
+                    if rotSpd == nil then
+                        local lastAngle = safeGet(laser, function(l) return l.LastAngleDegrees end, nil)
+                        if lastAngle ~= nil and angle ~= nil then
+                            rotSpd = angle - lastAngle
+                        else
+                            rotSpd = 0
+                        end
+                    end
+                    -- 长度：终点推算优先，MaxDistance/LaserLength 兜底，最终 400 默认
+                    local length
+                    if endPos then
+                        local d = endPos - e.Position
+                        length = d:Length()
+                    else
+                        length = safeGet(laser, function(l) return l.MaxDistance end, nil)
+                            or safeGet(laser, function(l) return l.LaserLength end, nil)
+                            or 400
+                    end
+                    entries[count] = {
+                        index = e.Index,
+                        pos = e.Position,
+                        vel = e.Velocity,
+                        speed = e.Velocity:Length(),
+                        radius = radius,
+                        kind = "laser",
+                        endPos = endPos,
+                        angle = angle or 0,
+                        rotSpd = rotSpd or 0,
+                        length = length,
+                        damage = safeGet(laser, function(l) return l.CollisionDamage or 2 end, 2),
+                    }
+                else
+                    -- ToLaser 读取失败（API 异常）：仍采集基础条目（威胁检测安全优先），
+                    -- 几何退化为 pos 点 + vel 线段由 hazard_query 兜底处理
+                    entries[count] = {
+                        index = e.Index,
+                        pos = e.Position,
+                        vel = e.Velocity,
+                        speed = e.Velocity:Length(),
+                        radius = safeGet(e, function(x) return x.Size or 6 end, 6),
+                        kind = "laser",
+                        endPos = nil,
+                        angle = 0,
+                        rotSpd = 0,
+                        length = 0,
+                        damage = safeGet(e, function(x) return x.CollisionDamage or 2 end, 2),
+                    }
                 end
-                -- 激光方向/终点：用 Position + AngleDegrees × Length 估算
-                -- 有 vel 的激光（扫描型）直接用 vel
-                entries[count] = {
-                    index = e.Index,
-                    pos = e.Position,
-                    vel = e.Velocity, -- 扫描/移动激光有速度
-                    speed = e.Velocity:Length(),
-                    radius = radius,
-                    kind = "laser",
-                }
             end
         end
     end

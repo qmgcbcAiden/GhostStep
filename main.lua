@@ -302,6 +302,86 @@ local function onPlayerUpdate(player)
     end
 end
 
+-- ===== 受击自动归因（挨打时自动诊断"为什么没躲掉"——调参仪表盘核心）=====
+-- MC_ENTITY_TAKE_DMG 在伤害应用前触发，state 里还是受击前那帧的判断，
+-- 正好用来归因：是没看见、看见太晚、躲错方向、权重被钳、还是来不及
+local ATTR_KIND_NAMES = {
+    undetected = "未检测",
+    late = "检测太晚",
+    wrongDir = "方向错误",
+    lowWeight = "权重不足(墙角)",
+    tooFast = "反应时间不足",
+}
+
+local function attributeHit(dmg, source)
+    local a = state.hitAttribution
+    a.total = a.total + 1
+
+    -- 伤害来源（EntityRef: .Type/.Variant/.Entity）
+    local srcType, srcVariant, srcPos = "?", "?", nil
+    if source then
+        if source.Type ~= nil then srcType = tostring(source.Type) end
+        if source.Variant ~= nil then srcVariant = tostring(source.Variant) end
+        local e = source.Entity
+        if e then
+            local okPos, p = pcall(function() return e.Position end)
+            if okPos and p then srcPos = p end
+        end
+    end
+
+    local t = state.threat
+    local level = t.level or 0
+    local w = state.control.weight or 0
+    local layer = state.decision.layer or "none"
+    local D = state.decision.dodgeDir
+
+    -- 分类（优先级: 未检测 > 方向错误 > 权重钳制 > 检测太晚 > 来不及）
+    local kind, advice
+    if level < Config.threatLow then
+        kind = "undetected"
+        advice = string.format(
+            "威胁=%.2f 低于介入阈值%.2f → 来源 type=%s var=%s 未被传感器识别或被过滤，检查危险源开关",
+            level, Config.threatLow, srcType, srcVariant)
+    elseif D and srcPos then
+        local away = state.player.position - srcPos
+        if away:Length() > 1 then
+            away = away:Normalized()
+            local dot = away.X * D.X + away.Y * D.Y
+            if dot < 0 then
+                kind = "wrongDir"
+                advice = string.format(
+                    "闪避方向与远离来源方向夹角>90°(dot=%.2f) → 弹道线逃逸惩罚权重↑或候选采样加密", dot)
+            end
+        end
+    end
+    if not kind then
+        local wallDist = terrain:minWallDistance(state.player.position)
+        if w < 0.35 and wallDist < Config.wallStuckThreshold then
+            kind = "lowWeight"
+            advice = string.format(
+                "墙角钳制 w=%.2f wallDist=%.0f → wallEscape 灵敏度↑或远离墙壁偏向加强", w, wallDist)
+        elseif level < Config.threatMedium then
+            kind = "late"
+            advice = string.format(
+                "威胁=%.2f 偏低(中阈%.2f) → threatSensitivity 调高 或 anticipateStrength↑",
+                level, Config.threatMedium)
+        else
+            kind = "tooFast"
+            advice = "高威胁仍被打 → 需更长预测视野（时空轨迹评分/Tier 1）"
+        end
+    end
+    a[kind] = (a[kind] or 0) + 1
+
+    Isaac.DebugString(string.format(
+        "[GhostStep3] 受击归因#%d: %s | 来源 type=%s var=%s dmg=%.1f 距离=%s | threat=%.2f w=%.2f 层=%s 命中预测=%s",
+        a.total, ATTR_KIND_NAMES[kind] or kind, srcType, srcVariant, dmg,
+        srcPos and string.format("%.0fpx", srcPos:Distance(state.player.position)) or "?",
+        level, w, layer, tostring(t.framesUntilHit)))
+    if advice then
+        Isaac.DebugString("[GhostStep3]   → " .. advice)
+    end
+end
+
 -- ===== 受伤诊断 + 受击自动回放（MC_ENTITY_TAKE_DMG）=====
 local lastHitDumpFrame = -9999
 local takeDmgLogged = false -- 首次触发诊断日志（任意实体）
@@ -326,6 +406,9 @@ local function onEntityTakeDmg(tookDamage, dmg, damageFlags, damageSource)
             "[GhostStep3] 玩家受伤确认: dmg=%.1f recording=%s buffer=%d帧",
             dmg, tostring(Config.recordingEnabled), ringBuffer.count))
     end
+
+    -- 受击自动归因：每次挨打都打（轻量一行+建议），回放 dump 才有冷却
+    SafeCall.call("attrHit", attributeHit, dmg, damageSource)
 
     if Config.diagnosticsEnabled then
         Isaac.DebugString(string.format(
@@ -428,6 +511,7 @@ safeAddCallback(ModCallbacks.MC_POST_GAME_STARTED, function()
     SafeCall.call("gameStarted", function()
         MCM.loadSettings()
         MCM.saveSettings()
+        Runtime.resetHitStats(state) -- 归因统计按局累积，新对局清零
         -- 开新录制会话（io 可用时创建 JSONL 文件）
         if Config.recordingEnabled then
             local okSeed, seed = pcall(function()

@@ -9,6 +9,7 @@ local BombSensor = {}
 local EntityType = EntityType
 
 local BOMB_DANGER_FRAME = 120 -- 引信开始危险的帧数（auto_dodge 验证值）
+local BOMB_FUSE_TOTAL = 150   -- 普通炸弹总引信时长（帧，~5秒@30fps）
 local BOMB_EXPLOSION_RADIUS = 90 -- 基础爆炸半径（像素）
 
 --- 是否为敌方炸弹
@@ -50,8 +51,10 @@ function BombSensor.collect(player, tracker, frame, config)
                     count = count + 1
                     local bomb = safeGet(e, function(x) return x:ToBomb() end, nil)
                     local radiusMul = 1
+                    local explosionDamage = 12
                     if bomb then
                         radiusMul = safeGet(bomb, function(b) return b.RadiusMultiplier or 1 end, 1)
+                        explosionDamage = safeGet(bomb, function(b) return b.ExplosionDamage or 12 end, 12)
                     end
                     entries[count] = {
                         index = e.Index,
@@ -60,6 +63,10 @@ function BombSensor.collect(player, tracker, frame, config)
                         speed = e.Velocity:Length(),
                         radius = BOMB_EXPLOSION_RADIUS * radiusMul,
                         kind = "bomb",
+                        damage = explosionDamage,
+                        -- 引信剩余帧估算：总长 150 帧 - 已燃帧数（clamp≥0）。
+                        -- Rep+ 无社区验证的倒计时 API，FrameCount 推算已够威胁分级用
+                        fuseFrames = math.max(0, BOMB_FUSE_TOTAL - fc),
                     }
                 end
             end

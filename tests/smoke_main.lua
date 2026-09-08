@@ -669,6 +669,97 @@ check("npc_attack sensor disabled by config", function()
     assert(trk.count == 0, "cleared when disabled")
 end)
 
+-- ===== 第一批改进回归：伤害加权 / 墙壁截断 / 旋转激光 / 引信紧迫度 =====
+
+-- 手工构造带墙地形: 5x1 格（每格40px），x=2 格（80-120px）为墙
+local function walledTerrain()
+    local ter = Terrain.create()
+    ter.valid = true
+    ter.sizeX = 5
+    ter.sizeY = 1
+    ter.topLeft = Vector(0, 0)
+    ter.grid = {}
+    for x = 0, 4 do
+        ter.grid[x + 1] = { walkable = (x ~= 2), danger = nil }
+    end
+    return ter
+end
+
+check("damage weighting: high damage raises urgency (3.6)", function()
+    local function urgencyFor(dmg)
+        local tracker = Tracker2.create()
+        -- 弹幕从右向左 3.5 帧后命中玩家
+        tracker:update({ { index = 1, pos = Vector(90, 0), vel = Vector(-20, 0), speed = 20, radius = 8,
+                           damage = dmg } }, 0, "projectile")
+        local hq = HazardQuery.create()
+        hq:update(tracker:getActive(2, 0))
+        local cfg = require("config/defaults").get()
+        local state = { player = { position = Vector(20, 0), velocity = Vector(0, 0), radius = 10 }, threat = {} }
+        ThreatLevel.evaluate(state, {
+            config = cfg, tracker = tracker, trackerEnemies = Tracker2.create(),
+            getHazards = function() return tracker:getActive(2, 0) end,
+            hazardQuery = hq, terrain = Terrain.create(),
+        }, 0)
+        return state.threat.collisionUrgency, state.threat.hitDamage
+    end
+    local u1, hd1 = urgencyFor(1)
+    local u3, hd3 = urgencyFor(3)
+    assert(u1 >= 0.8, "base urgency=" .. tostring(u1))
+    assert(u3 > u1 + 0.05, "damage weighting: u3=" .. tostring(u3) .. " u1=" .. tostring(u1))
+    assert(hd3 == 3 and hd1 == 1, "hitEntry damage passed through")
+end)
+
+check("wall truncation: projectile behind wall is not a threat (3.5)", function()
+    local hz = { { index = 1, pos = Vector(0, 0), vel = Vector(3, 0), speed = 3, radius = 5 } }
+    local hq = HazardQuery.create()
+    hq:update(hz)
+    local ter = walledTerrain()
+    -- 玩家在墙后 x=130（墙格 80-120px）：命中路径穿墙 → 截断为 nil
+    local tWall = hq:firstCollision(Vector(130, 0), Vector(0, 0), 5, 50, ter)
+    assert(tWall == nil, "wall should truncate, got t=" .. tostring(tWall))
+    -- 无墙地形（invalid）同几何 → 正常解出
+    local tOpen = hq:firstCollision(Vector(130, 0), Vector(0, 0), 5, 50, Terrain.create())
+    assert(tOpen ~= nil and tOpen > 0, "no wall: should hit, got " .. tostring(tOpen))
+end)
+
+check("rotating laser: sweep predicts future hit", function()
+    -- 激光起点(0,0)，终点(100,0)，顺时针旋转2度/帧；玩家在(70,20)静止
+    -- 激光扫过玩家方位角 atan2(20,70)≈15.9° → 约8帧后扫到
+    local hz = { { index = 1, pos = Vector(0, 0), vel = Vector(0, 0), speed = 0, radius = 5,
+                   kind = "laser", endPos = Vector(100, 0), angle = 0, rotSpd = 2, length = 100 } }
+    local hq = HazardQuery.create()
+    hq:update(hz)
+    local t = hq:firstCollision(Vector(70, 20), Vector(0, 0), 3, 28)
+    assert(t ~= nil and t <= 12, "sweep should hit within 12 frames, got " .. tostring(t))
+    -- 不旋转的激光永远指向 +x，玩家在上方 20px 外 → 无命中
+    local hz2 = { { index = 1, pos = Vector(0, 0), vel = Vector(0, 0), speed = 0, radius = 5,
+                    kind = "laser", endPos = Vector(100, 0), angle = 0, rotSpd = 0, length = 100 } }
+    local hq2 = HazardQuery.create()
+    hq2:update(hz2)
+    local t2 = hq2:firstCollision(Vector(70, 20), Vector(0, 0), 3, 28)
+    assert(t2 == nil, "static laser pointing away should not hit")
+end)
+
+check("bomb fuse urgency: imminent explosion dominates (batch1)", function()
+    -- 炸弹距玩家80px、以2px/帧逼近（约15帧后进入爆炸半径，基础 urgency≈0.37），
+    -- 但引信只剩 5 帧 → fuse urgency≈0.93 应占主导
+    local tracker = Tracker2.create()
+    tracker:update({ { index = 1, pos = Vector(80, 0), vel = Vector(-2, 0), speed = 2, radius = 40,
+                       kind = "bomb", damage = 1, fuseFrames = 5 } }, 0, "enemy")
+    local hq = HazardQuery.create()
+    hq:update(tracker:getActive(2, 0))
+    local cfg = require("config/defaults").get()
+    local state = { player = { position = Vector(0, 0), velocity = Vector(0, 0), radius = 10 }, threat = {} }
+    ThreatLevel.evaluate(state, {
+        config = cfg, tracker = Tracker2.create(), trackerEnemies = tracker,
+        getHazards = function() return tracker:getActive(2, 0) end,
+        hazardQuery = hq, terrain = Terrain.create(),
+    }, 0)
+    assert(state.threat.collisionUrgency >= 0.9,
+        "fuse urgency=" .. tostring(state.threat.collisionUrgency))
+    assert(state.threat.hitKind == "bomb", "hitKind=" .. tostring(state.threat.hitKind))
+end)
+
 -- ===== 输出结果 =====
 print("========== SMOKE RESULTS ==========")
 for i = 1, #results do

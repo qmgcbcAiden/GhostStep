@@ -60,7 +60,7 @@ function Pipeline.run(state, deps, frame)
             layer = "early_dodge"
             local _, hitEntry = deps.hazardQuery:firstCollision(
                 state.player.position, state.player.velocity,
-                state.player.radius, 28)
+                state.player.radius, 28, deps.terrain)
             if hitEntry then
                 rawDir = EarlyDodge.compute(hitEntry, state.player.position)
             end

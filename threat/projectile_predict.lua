@@ -173,38 +173,24 @@ function Predict.timeToHitArc(entry, playerPos, playerVel, playerRadius, horizon
 end
 
 ---------------------------------------------------------------
--- Phase 3.5: 墙壁截断碰撞检测
+-- Phase 3.5: 墙壁截断验证（已接线 hazard_query）
 ---------------------------------------------------------------
 
---- 带地形感知的碰撞检测：弹幕路径撞墙时截断，避免"墙后虚假危险区"
---- terrain: Terrain 实例（必须已 build）；其他参数同 timeToHitMoving
---- 返回: 命中帧数（nil=无碰撞，考虑墙壁后）
-function Predict.timeToHitMovingWithWalls(entry, playerPos, playerVel, playerRadius, horizon, terrain)
-    if not terrain or not terrain.valid then
-        return Predict.timeToHitMoving(entry, playerPos, playerVel, playerRadius, horizon)
-    end
-
-    local combined = entry.radius + playerRadius
-    local combinedSq = combined * combined
-    local step = 3 -- 步进帧数（3帧精度足够，平衡性能）
-
-    for t = 0, horizon, step do
-        -- 弹幕 t 帧后位置
-        local projPos = entry.pos + entry.vel * t
-        -- 玩家 t 帧后位置
-        local plPos = playerPos + playerVel * t
-        -- 碰撞检查
-        local dx = projPos.X - plPos.X
-        local dy = projPos.Y - plPos.Y
-        if dx * dx + dy * dy <= combinedSq then
-            return t
-        end
-        -- 墙壁检查：弹幕预测位置是否在墙内（撞墙→截断）
-        if not Terrain.isWalkableAt(terrain, projPos) then
-            return nil -- 弹幕路径被墙壁截断，不再威胁玩家
+--- 弹幕命中路径的墙壁抽查：闭式解给出命中帧 t 后，抽查路径上 3 个点，
+--- 任一点在不可通行格内 → 弹幕会先撞墙 → 该威胁对墙后玩家无效。
+--- 比"沿路径逐步模拟"便宜一个数量级，闭式解仍保精度。
+--- terrain: Terrain 实例（invalid 或 nil 时不截断）
+function Predict.pathBlockedByWall(entry, t, terrain)
+    if not terrain or not terrain.valid or t <= 0 then return false end
+    local samples = 3
+    for i = 1, samples do
+        local ti = t * i / (samples + 1)
+        local probe = entry.pos + entry.vel * ti
+        if not terrain:isWalkableAt(probe) then
+            return true
         end
     end
-    return nil
+    return false
 end
 
 return Predict

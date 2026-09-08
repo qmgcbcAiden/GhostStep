@@ -39,6 +39,9 @@ function Runtime.create(config)
             densityScore = 0,   -- 弹幕场密度分数 [0,1]
             framesUntilHit = -1, -- 沿当前路径首次碰撞帧数（-1 无碰撞）
             gradientDir = nil,  -- 弹幕场梯度规避方向（Vector 或 nil）
+            hitKind = nil,      -- 当前预测命中的威胁类型（受击归因用）
+            hitDamage = nil,    -- 命中威胁的伤害值
+            hitDist = nil,      -- 命中威胁的距离（像素）
             projectileCount = 0,
             enemyCount = 0,     -- 接触威胁敌人数
             laserCount = 0,     -- 激光威胁数
@@ -46,6 +49,17 @@ function Runtime.create(config)
             effectCount = 0,    -- 效果/水坑/火焰数
             npcAttackCount = 0, -- NPC攻击前兆数
             hazardCount = 0,    -- 活跃威胁实体总数（所有类型）
+        },
+
+        -- 受击归因统计（按局累积，新对局重置；MCM 调试页显示）
+        -- 调参仪表盘：哪类失败多就知道该调哪组参数
+        hitAttribution = {
+            undetected = 0, -- 未检测：受击时威胁低于介入阈值（传感器覆盖缺口）
+            late = 0,       -- 检测太晚：威胁中等但介入不足（灵敏度/提前量）
+            wrongDir = 0,   -- 方向错误：闪避方向朝伤害来源（评分权重问题）
+            lowWeight = 0,  -- 权重不足：方向对但被墙角钳制（原则5权衡）
+            tooFast = 0,    -- 反应时间不足：高威胁高权重仍被打（预测窗口）
+            total = 0,
         },
 
         -- 决策输出
@@ -93,6 +107,12 @@ end
 --- 判定是否真正启用（总开关 AND ALT 开关 AND 非观察模式）
 function Runtime.isDodgeActive(state)
     return state.config.enabled and state.userEnabled
+end
+
+--- 重置受击归因统计（MC_POST_GAME_STARTED 新对局时调用）
+function Runtime.resetHitStats(state)
+    local a = state.hitAttribution
+    for k in pairs(a) do a[k] = 0 end
 end
 
 return Runtime

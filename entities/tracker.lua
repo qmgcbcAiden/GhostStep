@@ -23,19 +23,18 @@ function Tracker.create()
 end
 
 local function newEntry(entry, frame)
-    return {
-        pos = entry.pos,
-        vel = entry.vel,
-        speed = entry.speed,
-        radius = entry.radius,
-        kind = entry.kind,
-        firstFrame = frame,
-        lastFrame = frame,
-        historyCount = 1,
-        -- 历史环形缓冲：定长数组复用，避免 table.remove 的 O(n) 与 GC 压力
-        history = { { pos = entry.pos, vel = entry.vel, frame = frame } },
-        historyHead = 2, -- 初始条目在 slot 1，下一条写入 slot 2
-    }
+    -- 全字段复制（pos/vel 之外 sensors 提供的 damage/fuseFrames/endPos/angle/kind 等都要带上）
+    local t = {}
+    for k, v in pairs(entry) do
+        if k ~= "index" then t[k] = v end
+    end
+    t.firstFrame = frame
+    t.lastFrame = frame
+    t.historyCount = 1
+    -- 历史环形缓冲：定长数组复用，避免 table.remove 的 O(n) 与 GC 压力
+    t.history = { { pos = entry.pos, vel = entry.vel, frame = frame } }
+    t.historyHead = 2 -- 初始条目在 slot 1，下一条写入 slot 2
+    return t
 end
 
 --- 用当帧实体列表更新追踪器。entries: {{index, pos, vel, speed, radius, kind}}
@@ -49,11 +48,11 @@ function Tracker.update(self, entries, frame, expiryKind)
         local t = tracked[e.index]
         seen[e.index] = true
         if t then
-            -- 已追踪：更新状态并追加历史
-            t.pos = e.pos
-            t.vel = e.vel
-            t.speed = e.speed
-            t.radius = e.radius
+            -- 已追踪：同步全部数据字段（pos/vel 之外的 kind/damage/endPos/angle 等每帧可变），
+            -- 再追加历史
+            for k, v in pairs(e) do
+                if k ~= "index" then t[k] = v end
+            end
             t.lastFrame = frame
             local head = t.historyHead
             local slot = t.history[head]

@@ -308,6 +308,14 @@ function MCM.register(deps)
         local n = (stateRef.ringBuffer and stateRef.ringBuffer.count) or 0
         return "录制: 缓冲 " .. n .. " 帧 (约" .. math.floor(n / 30) .. "秒, 死亡时输出到日志)"
     end)
+    -- 受击归因统计（按局累积，调参仪表盘：哪类失败多就调哪组参数）
+    ModConfigMenu.AddText(CAT, "调试", function()
+        local a = stateRef.hitAttribution
+        if not a or a.total == 0 then return "受击归因: 本局无受击" end
+        return string.format(
+            "受击归因(%d次): 未检测%d 太晚%d 方向%d 权重%d 不及%d",
+            a.total, a.undetected, a.late, a.wrongDir, a.lowWeight, a.tooFast)
+    end)
     -- 文件输出状态（--luadebug 说明）
     ModConfigMenu.AddText(CAT, "录制", function()
         local sr = stateRef.sessionRecorder

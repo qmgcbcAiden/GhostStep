@@ -48,6 +48,15 @@ function Snapshot.capture(state, frame, detailLevel)
         snap.hitFrame = threat.framesUntilHit
         snap.budgetMs = decision.usedBudgetMs
         snap.canFly = player.canFly
+        -- 命中威胁明细（受击归因离线分析用）
+        if threat.hitKind then
+            snap.hitKind = threat.hitKind
+            snap.hitDmg = threat.hitDamage
+            snap.hitDist = threat.hitDist
+        end
+        -- 合成输出（诊断"AI 是否压制玩家"的关键三元组：P/D/输出）
+        snap.cx = control.direction.X
+        snap.cy = control.direction.Y
     end
 
     return snap

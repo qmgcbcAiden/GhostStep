@@ -65,6 +65,10 @@ local function safeProp(proj, getter, fallback)
     return fallback
 end
 
+--- 诊断日志状态（须声明在 clearOwnership 之前，否则重置的是全局变量）
+local _projLoggedThisRoom = false
+local _projLastCount = -1
+
 --- 清空归属缓存（房间切换时由 main 调用）
 function ProjectileSensor.clearOwnership()
     ownershipCache = {}
@@ -73,9 +77,6 @@ function ProjectileSensor.clearOwnership()
 end
 
 --- 采集当帧敌方弹幕并喂给追踪器
--- 诊断标记：首次运行/每次进房后各打一行日志（只打一次避免刷屏）
-local _projLoggedThisRoom = false
-
 function ProjectileSensor.collect(player, tracker, frame, config)
     if not config.hazardProjectiles then
         if tracker.count > 0 then tracker:clear() end
@@ -131,6 +132,8 @@ function ProjectileSensor.collect(player, tracker, frame, config)
                     vel = proj.Velocity,
                     speed = proj.Velocity:Length(),
                     radius = proj.Size,
+                    -- 伤害值（auto_dodge 模式: projectile.Damage 优先，CollisionDamage 兜底）
+                    damage = safeProp(proj, function(p) return p.Damage or p.CollisionDamage or 1 end, 1),
                 }
             end
         end

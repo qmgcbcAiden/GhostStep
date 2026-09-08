@@ -78,6 +78,12 @@ function EnemySensor.collect(player, tracker, frame, config)
                 vel = e.Velocity,
                 speed = e.Velocity:Length(),
                 radius = e.Size,
+                -- 接触伤害值（auto_dodge: entity.CollisionDamage or 1；读不到按 1 保守处理）
+                damage = (function()
+                    local okCd, cd = pcall(function() return e.CollisionDamage end)
+                    if okCd and type(cd) == "number" and cd > 0 then return cd end
+                    return 1
+                end)(),
             }
         end
     end

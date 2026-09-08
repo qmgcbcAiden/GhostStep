@@ -99,13 +99,14 @@ function ThreatLevel.evaluate(state, deps, frame)
     -- 站立时: 静止重叠检测 + 来袭弹幕命中时间（弹幕会撞上不动的玩家）
     local urgency = 0
     local hitFrame = nil
+    local hitEntry = nil
     local t
     if player.velocity:Length() > 0.5 then
-        t = deps.hazardQuery:firstCollision(
-            player.position, player.velocity, player.radius, horizon)
+        t, hitEntry = deps.hazardQuery:firstCollision(
+            player.position, player.velocity, player.radius, horizon, deps.terrain)
     else
-        t = deps.hazardQuery:firstCollision(
-            player.position, Vector(0, 0), player.radius, horizon)
+        t, hitEntry = deps.hazardQuery:firstCollision(
+            player.position, Vector(0, 0), player.radius, horizon, deps.terrain)
     end
     if t then
         hitFrame = t
@@ -118,9 +119,26 @@ function ThreatLevel.evaluate(state, deps, frame)
             local damageMult = mathext.clamp(damage / 1, 0.5, 3.0) -- baseDamage=1
             urgency = math.min(urgency * damageMult, 1.0)
         end
+        -- 炸弹引信紧迫度：随剩余帧减少从 0.6 升到 1.0
+        -- （引信数据为 FrameCount 推算估算值，见 sensors/bombs.lua；
+        --   remap 只支持递增区间，用 0→30 帧映射 1.0→0.6 的等价写法）
+        if hitEntry and hitEntry.kind == "bomb" and hitEntry.fuseFrames then
+            local fuseUrgency = mathext.remap(hitEntry.fuseFrames, 0, 30, 1.0, 0.6)
+            urgency = math.max(urgency, mathext.clamp(fuseUrgency, 0.5, 1.0))
+        end
     end
     threat.collisionUrgency = urgency
     threat.framesUntilHit = hitFrame or -1
+    -- 命中威胁摘要（受击归因/MCM 只读显示用）
+    if hitEntry then
+        threat.hitKind = hitEntry.kind or "projectile"
+        threat.hitDamage = hitEntry.damage or 1
+        threat.hitDist = hitEntry.pos:Distance(player.position)
+    else
+        threat.hitKind = nil
+        threat.hitDamage = nil
+        threat.hitDist = nil
+    end
 
     -- 地形危险（站上地刺/TNT 格子）：直接给高威胁
     if deps.terrain.valid then

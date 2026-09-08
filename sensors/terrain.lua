@@ -130,7 +130,10 @@ function Terrain.isWalkableAt(self, worldPos)
     local idx = Terrain.cellAt(self, worldPos)
     if not idx then return true end -- 房间外默认可通行（由调用方处理墙壁）
     local cell = self.grid[idx]
-    return cell and cell.walkable or true
+    if cell == nil then return true end -- 格子数据缺失时宽容
+    -- 注意不能用 "cell and cell.walkable or true"——walkable=false 时会错误地返回 true
+    -- （and-or 陷阱，曾导致格子墙壁检测整体失效，只剩房间边界检测在兜底）
+    return cell.walkable == true
 end
 
 --- 危险格子查询
