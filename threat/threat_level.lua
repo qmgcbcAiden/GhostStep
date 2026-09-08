@@ -119,10 +119,12 @@ function ThreatLevel.evaluate(state, deps, frame)
             local damageMult = mathext.clamp(damage / 1, 0.5, 3.0) -- baseDamage=1
             urgency = math.min(urgency * damageMult, 1.0)
         end
-        -- 炸弹引信紧迫度：随剩余帧减少从 0.6 升到 1.0
-        -- （引信数据为 FrameCount 推算估算值，见 sensors/bombs.lua；
+        -- 引信紧迫度：随剩余帧减少从 0.6 升到 1.0
+        -- （炸弹引信数据为 FrameCount 推算估算值，见 sensors/bombs.lua；
+        --   NPC 攻击前摇由 npc_attacks.lua 的 fuseFrames 提供；
         --   remap 只支持递增区间，用 0→30 帧映射 1.0→0.6 的等价写法）
-        if hitEntry and hitEntry.kind == "bomb" and hitEntry.fuseFrames then
+        -- 通用化：任何带 fuseFrames 的威胁都走此逻辑（Tier 1 M4: 零新机制）
+        if hitEntry and hitEntry.fuseFrames then
             local fuseUrgency = mathext.remap(hitEntry.fuseFrames, 0, 30, 1.0, 0.6)
             urgency = math.max(urgency, mathext.clamp(fuseUrgency, 0.5, 1.0))
         end

@@ -1,0 +1,11 @@
+{
+    "runtime.version": "LuaJIT",
+    "workspace.library": [
+        "types"
+    ],
+    "diagnostics": {
+        "globals": [
+            "ModConfigMenu"
+        ]
+    }
+}

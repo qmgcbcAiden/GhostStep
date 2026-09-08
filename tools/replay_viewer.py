@@ -354,6 +354,11 @@ def render_frame(rec, requested):
 
     # 版面
     ax.set_aspect("equal")
+    # hz 为空时坐标轴默认 (0,1)×(0,1)：玩家圆和箭头会被 bbox_inches=crop 掉——
+    # 设合理默认范围让原点玩家+方向箭头有足够显示空间
+    if not rec.get("hz"):
+        ax.set_xlim(-200, 200)
+        ax.set_ylim(-200, 200)
     ax.grid(True, color=GRID, linewidth=0.8, zorder=0)
     ax.axhline(0, color=GRID, linewidth=1, zorder=0)
     ax.axvline(0, color=GRID, linewidth=1, zorder=0)

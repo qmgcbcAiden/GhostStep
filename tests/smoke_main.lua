@@ -105,7 +105,7 @@ check("predict timeToHit", function()
 end)
 
 -- ===== threat level（模拟弹幕接近场景）=====
-mock = mock or {}
+local mock = mock or {}
 local ThreatLevel = require("threat/threat_level")
 local HazardQuery = require("threat/hazard_query")
 local Tracker2 = require("entities/tracker")
@@ -782,6 +782,56 @@ check("npc_attack sensor disabled by config", function()
     assert(trk.count == 0, "cleared when disabled")
 end)
 
+check("npc_attack windup countdown entry has fuseFrames and appearFrame", function()
+    local trk = Tracker.create()
+    -- Mom's Hand (213) "JumpDown": windupFrames=11, GetFrame=3 → fuseFrames=8
+    SMOKE.entities = {
+        mockNpcAttack({ Type = 213,
+            GetSprite = function() return {
+                GetAnimation = function() return "JumpDown" end,
+                GetFrame = function() return 3 end,
+            } end }),
+    }
+    NpcAttackSensor.collect(nil, trk, 20, { hazardNpcAttacks = true })
+    assert(trk.count == 1, "entry tracked")
+    local entry = trk.tracked[next(trk.tracked)]
+    assert(entry.kind == "npc_attack", "kind=" .. tostring(entry.kind))
+    assert(entry.fuseFrames == 8, "fuseFrames=11-3=8, got " .. tostring(entry.fuseFrames))
+    assert(entry.appearFrame == 28, "appearFrame=20+8=28, got " .. tostring(entry.appearFrame))
+    assert(entry.radius == 62, "Mom's Hand radius=62, got " .. tostring(entry.radius))
+    SMOKE.entities = {}
+end)
+
+check("npc_attack laser windup generates laser kind with endPos", function()
+    local trk = Tracker.create()
+    -- Vis (246) "Laser": category=laser, kind=laser, endPos = pos + dir*480
+    -- Mock player at (200,0), Vis at (50,0) → direction = (150,0).Normalized() = (1,0)
+    -- endPos should be pos + (1,0)*480 = (530,0)
+    SMOKE.entities = {
+        mockNpcAttack({ Type = 246, Position = Vector(50, 0),
+            GetSprite = function() return {
+                GetAnimation = function() return "Laser" end,
+                GetFrame = function() return 0 end,
+            } end }),
+    }
+    -- Override Isaac.GetPlayer for this test to return known position
+    local origGetPlayer = Isaac.GetPlayer
+    Isaac.GetPlayer = function() return { Position = Vector(200, 0) } end
+    NpcAttackSensor.collect(nil, trk, 5, { hazardNpcAttacks = true })
+    Isaac.GetPlayer = origGetPlayer -- restore
+    assert(trk.count == 1, "laser entry tracked")
+    local entry = trk.tracked[next(trk.tracked)]
+    assert(entry.kind == "laser", "kind=laser, got " .. tostring(entry.kind))
+    assert(entry.radius == 28, "laser radius=28, got " .. tostring(entry.radius))
+    -- endPos should be along direction from (50,0) toward (200,0), length480
+    -- direction = (1,0), endPos = (50,0) + (1,0)*480 = (530,0)
+    -- vel = direction * pathLength = (480,0) (vel carries endPos offset)
+    assert(entry.vel.X > 400, "vel.X should be ~480 (endPos offset), got " .. tostring(entry.vel.X))
+    -- fuseFrames: windup=22, GetFrame=0 → fuse=22
+    assert(entry.fuseFrames == 22, "fuseFrames=22-0=22, got " .. tostring(entry.fuseFrames))
+    SMOKE.entities = {}
+end)
+
 -- ===== 第一批改进回归：伤害加权 / 墙壁截断 / 旋转激光 / 引信紧迫度 =====
 
 -- 手工构造带墙地形: 5x1 格（每格40px），x=2 格（80-120px）为墙
@@ -871,6 +921,28 @@ check("bomb fuse urgency: imminent explosion dominates (batch1)", function()
     assert(state.threat.collisionUrgency >= 0.9,
         "fuse urgency=" .. tostring(state.threat.collisionUrgency))
     assert(state.threat.hitKind == "bomb", "hitKind=" .. tostring(state.threat.hitKind))
+end)
+
+check("npc_attack fuse urgency: imminent stomp dominates (M4 generalization)", function()
+    -- NPC attack 前兆: fuseFrames=5, radius=64, 静止, 距玩家60px
+    -- 合并 radius=64+10=74, dist=60 < 74 → 重叠 → t=0 → collisionUrgency≈0.98
+    -- fuseUrgency: remap(5, 0, 30, 1.0, 0.6) ≈ 0.916 → max(0.98, 0.916) ≈ 0.98
+    -- 核心验证: npc_attack kind 的 fuseFrames 也走引信紧迫度逻辑（旧版只走 bomb）
+    local tracker = Tracker2.create()
+    tracker:update({ { index = 1, pos = Vector(60, 0), vel = Vector(0, 0), speed = 0, radius = 64,
+                       kind = "npc_attack", fuseFrames = 5 } }, 0, "enemy")
+    local hq = HazardQuery.create()
+    hq:update(tracker:getActive(2, 0))
+    local cfg = require("config/defaults").get()
+    local state = { player = { position = Vector(0, 0), velocity = Vector(0, 0), radius = 10 }, threat = {} }
+    ThreatLevel.evaluate(state, {
+        config = cfg, tracker = Tracker2.create(), trackerEnemies = tracker,
+        getHazards = function() return tracker:getActive(2, 0) end,
+        hazardQuery = hq, terrain = Terrain.create(),
+    }, 0)
+    assert(state.threat.collisionUrgency >= 0.9,
+        "npc_attack fuse urgency=" .. tostring(state.threat.collisionUrgency))
+    assert(state.threat.hitKind == "npc_attack", "hitKind=" .. tostring(state.threat.hitKind))
 end)
 
 -- ===== 实测分析修复回归：effect 伤害兜底 + 被围钳制放宽 =====

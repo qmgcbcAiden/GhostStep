@@ -1,49 +1,28 @@
 -- sensors/npc_attacks.lua
--- NPC 攻击前兆检测（Phase 3.4）
--- 通过动画字符串匹配识别 Boss/NPC 的攻击准备动作，提前生成威胁区域
--- 动画数据库移植自 auto_dodge_helper（~20种关键 Boss 动画，社区验证）
+-- NPC attack pre-fire detection (Phase 3.4 + Tier 1 table-driven refactor)
+-- Scans NPCs for known attack animations (from data/npc_animdb.lua),
+-- generates threat entries using category profiles (from data/npc_profiles.lua).
 --
--- 工作原理：每帧扫描活跃 NPC，读取当前动画名称（小写），匹配到已知攻击动画时
--- 生成一个"即将发生的威胁区域"条目（带位置/半径/运动方向），喂入追踪器。
--- 决策管线在威胁区域真正造成伤害之前就开始绕开——这就是"提前规避"（原则6）。
+-- Tier 1 additions:
+--   - fuseFrames: windup countdown → feeds into threat_level urgency (reuse bomb fuse mechanism)
+--   - appearFrame: when the attack actually hits → future_motion "not yet existing" logic
+--   - Table-driven: all NPC type + animation mappings in data/npc_animdb.lua
 --
--- 覆盖的 Boss/NPC（按伤害频率排序）：
---   落点型: Mom's Hand/Dead Hand, Daddy Long Legs (脚/臂/踩踏), Widow, Leaper, Hopper
---   射击型: Horf (蓄力射击)
---   激光型: Vis, Maw, Bloat, Adversary (蓄力激光/Brimstone)
---   跳跃型: Widow/Leaper/Hopper (落地冲击)
--- 未覆盖（Phase 3b 增量扩展）：其他需要动画数据库的 Boss
+-- Coverage: stomping (Daddy Long Legs), jumping (Mom's Hand, Widow, Leaper),
+--   laser windup (Vis, Maw, Bloat, Adversary), ranged (Horf, Gatling Gurdy)
 
 local NpcAttackSensor = {}
 
 local EntityType = EntityType
+local Profiles = require("data/npc_profiles")
 
--- ===== NPC 类型常量（auto_dodge 验证值）=====
-local TYPE_MOMS_HAND = 213
-local TYPE_MOMS_DEAD_HAND = 287
-local TYPE_DADDYLONGLEGS = 101
-local TYPE_WIDOW = 100
-local TYPE_LEAPER = 34
-local TYPE_HOPPER = 29
-local TYPE_HORF = 12
-local TYPE_VIS = 246 -- ENTITY_VIS (Isaac variant 246, not nil — 用数值避免 enum 问题)
-local TYPE_MAW = 21   -- ENTITY_MAW
-local TYPE_BLOAT = 72 -- ENTITY_BLOAT (The Bloat)
-local TYPE_ADVERSARY = 273 -- ENTITY_ADVERSARY
+-- Load animation database (pcall: file missing = no coverage = graceful degradation)
+local okAnimDB, animDB = pcall(require, "data/npc_animdb")
+if not okAnimDB then animDB = nil end
 
--- ===== 威胁配置（auto_dodge CONFIG 值，已验证）=====
-local FALLING_IMPACT_RADIUS = 62  -- 妈妈手/脚落点半径
-local STOMP_IMPACT_RADIUS = 64    -- Daddy Long Legs 踩踏半径
-local JUMP_LANDING_RADIUS = 54    -- Widow/Leaper 落地半径
-local SMALL_JUMP_RADIUS = 42      -- Hopper 小跳落地半径
-local SHOOTER_WINDUP_RADIUS = 54  -- Horf 蓄力射击半径
-local LASER_WINDUP_RADIUS = 28    -- 激光/Brimstone 蓄力半径
-local LASER_WINDUP_LENGTH = 480   -- 激光预测长度（像素）
-local JUMP_VELOCITY_SCALE = 0.75  -- 跳跃落点速度缩放
+-- ===== Animation lookup =====
 
--- ===== 动画匹配工具 =====
-
---- 安全读取动画名称（小写），出错返回""
+--- Safe lowercase animation name read
 local function safeAnimationLower(entity)
     local okSprite, sprite = pcall(function() return entity:GetSprite() end)
     if not okSprite or sprite == nil then return "" end
@@ -52,88 +31,123 @@ local function safeAnimationLower(entity)
     return string.lower(anim)
 end
 
---- 动画字符串包含任一 token
-local function hasToken(anim, tokens)
-    for i = 1, #tokens do
-        if string.find(anim, tokens[i], 1, true) then return true end
+--- Find attack animation entry from animDB for this entity + current animation
+--- Returns {name, totalFrames, windupFrames, category} or nil
+local function findAttackEntry(entityType, entityVariant, animLower)
+    if not animDB then return nil end
+    local key = tostring(entityType) .. ":" .. tostring(entityVariant or 0)
+    local entries = animDB[key]
+    if not entries then return nil end
+    -- Check if current animation matches any attack animation (case-insensitive)
+    for i = 1, #entries do
+        local e = entries[i]
+        if string.lower(e.name) == animLower then
+            return e
+        end
+    end
+    return nil
+end
+
+--- Animations to exclude (death/appear transitions are not attacks)
+local EXCLUDE_TOKENS = { "death", "appear" }
+local function isExcludedAnimation(anim)
+    for i = 1, #EXCLUDE_TOKENS do
+        if string.find(anim, EXCLUDE_TOKENS[i], 1, true) then return true end
     end
     return false
 end
 
--- ===== 攻击判定：返回 {kind, radius, vel?, expands?, ...} 或 nil =====
+--- Get entity-specific jump radius from profile table
+local function getJumpRadius(entityType)
+    return Profiles.jumpRadiusByType[entityType] or Profiles.defaultJumpRadius
+end
 
-local function detectAttack(entity)
-    local t = entity.Type
-    local anim = safeAnimationLower(entity)
-    if anim == "" then return nil end
-
-    -- 落点型：妈妈的手
-    if t == TYPE_MOMS_HAND then
-        if hasToken(anim, {"jumpdown"}) then
-            return { kind = "falling_impact", radius = FALLING_IMPACT_RADIUS,
-                     pos = entity.Position, vel = Vector(0, 0), speed = 0,
-                     expands = true, initialRadius = 6, growthFrames = 12 }
-        end
-    -- 落点型：妈妈的死手
-    elseif t == TYPE_MOMS_DEAD_HAND then
-        if hasToken(anim, {"jumpdown"}) then
-            return { kind = "falling_impact", radius = FALLING_IMPACT_RADIUS + 4,
-                     pos = entity.Position, vel = Vector(0, 0), speed = 0,
-                     expands = true, initialRadius = 6, growthFrames = 12 }
-        end
-    -- 踩踏型：Daddy Long Legs
-    elseif t == TYPE_DADDYLONGLEGS then
-        if hasToken(anim, {"stompleg", "stomparm", "stomp"}) then
-            return { kind = "stomp_impact", radius = STOMP_IMPACT_RADIUS,
-                     pos = entity.Position, vel = Vector(0, 0), speed = 0,
-                     expands = true, initialRadius = 8, growthFrames = 8 }
-        end
-    -- 跳跃型：Widow（排除"appear"动画）
-    elseif t == TYPE_WIDOW then
-        if hasToken(anim, {"jump"}) and not hasToken(anim, {"appear"}) then
-            local vel = entity.Velocity * JUMP_VELOCITY_SCALE
-            return { kind = "jump_landing", radius = JUMP_LANDING_RADIUS,
-                     pos = entity.Position, vel = vel, speed = vel:Length() }
-        end
-    -- 跳跃型：Leaper/Hopper
-    elseif t == TYPE_LEAPER or t == TYPE_HOPPER then
-        if hasToken(anim, {"hop", "jump"}) and not hasToken(anim, {"appear"}) then
-            local vel = entity.Velocity * JUMP_VELOCITY_SCALE
-            return { kind = "jump_landing", radius = t == TYPE_LEAPER and JUMP_LANDING_RADIUS or SMALL_JUMP_RADIUS,
-                     pos = entity.Position, vel = vel, speed = vel:Length() }
-        end
-    -- 射击型：Horf 蓄力
-    elseif t == TYPE_HORF then
-        if hasToken(anim, {"attack"}) then
-            return { kind = "shooter_windup", radius = SHOOTER_WINDUP_RADIUS,
-                     pos = entity.Position, vel = Vector(0, 0), speed = 0 }
-        end
-    -- 激光型：Vis/Maw/Bloat/Adversary 蓄力 Brimstone
-    elseif t == TYPE_VIS or t == TYPE_MAW or t == TYPE_BLOAT or t == TYPE_ADVERSARY then
-        if hasToken(anim, {"death", "appear"}) then return nil end -- 排除死亡/出现动画
-        if hasToken(anim, {"laser", "brim", "beam", "charge"}) then
-            -- 激光方向：从 NPC 朝玩家方向预测路径
-            local dir = Vector(0, 0)
-            local okPlayer, player = pcall(Isaac.GetPlayer, 0)
-            if okPlayer and player then
-                local delta = player.Position - entity.Position
-                if delta:Length() > 1 then dir = delta:Normalized() end
-            end
-            return { kind = "laser_windup", radius = LASER_WINDUP_RADIUS,
-                     pos = entity.Position,
-                     vel = dir * LASER_WINDUP_LENGTH, -- 终点偏移
-                     speed = 0 }
-        end
-    end
-
+--- Get player position (for laser direction calculation)
+local function getPlayerPosition()
+    local ok, player = pcall(Isaac.GetPlayer, 0)
+    if ok and player then return player.Position end
     return nil
 end
 
--- ===== 采集 =====
+--- Build tracker entry from attack detection
+--- Returns {pos, vel, speed, radius, kind, fuseFrames?, appearFrame?, ...} or nil
+local function buildEntry(entity, attackEntry, frame)
+    local cat = attackEntry.category
+    local profile = Profiles.categories[cat]
+    if not profile then return nil end
 
---- 采集当帧活跃 NPC 的攻击前兆，喂入追踪器
+    local pos = entity.Position
+    local kind = profile.kind
+    local radius
+    local vel = Vector(0, 0)
+    local speed = 0
+
+    if cat == "stomping" then
+        radius = profile.radius
+
+    elseif cat == "jumping" then
+        radius = getJumpRadius(entity.Type)
+        if profile.velScale and profile.velScale > 0 then
+            vel = entity.Velocity * profile.velScale
+            speed = vel:Length()
+        end
+
+    elseif cat == "laser" or cat == "ranged" then
+        radius = profile.radius
+        -- Direction: NPC -> player (laser fires toward player)
+        local playerPos = getPlayerPosition()
+        if playerPos then
+            local delta = playerPos - pos
+            if delta:Length() > 1 then
+                vel = delta:Normalized() * (profile.pathLength or 480)
+            end
+        end
+    end
+
+    -- Tier 1 fields: fuseFrames and appearFrame
+    -- fuseFrames: frames until the attack lands (windupFrames - already played)
+    -- appearFrame: absolute frame when the threat becomes real
+    -- NOTE: for npc_attack kind, future_motion uses appearFrame to determine existence
+    -- NOTE: for laser kind, the entry is immediately active (no fuse delay in collision)
+    local entry = {
+        pos = pos,
+        vel = vel,
+        speed = speed,
+        radius = radius,
+        kind = kind,
+    }
+
+    -- Windup countdown (fuse): how many frames until the attack hits
+    -- attackEntry.windupFrames = total windup frames for this animation
+    -- entity:GetSprite():GetFrame() = current frame within animation (0-indexed)
+    local okFrame, animFrame = pcall(function()
+        return entity:GetSprite():GetFrame()
+    end)
+    if okFrame and type(animFrame) == "number" then
+        local remaining = attackEntry.windupFrames - animFrame
+        if remaining > 0 then
+            entry.fuseFrames = remaining
+            -- appearFrame for npc_attack kind (future_motion skips before this)
+            if kind == "npc_attack" then
+                entry.appearFrame = frame + remaining
+            end
+        end
+    end
+
+    return entry
+end
+
+-- ===== Public API =====
+
+--- Collect active NPC attack precursors into tracker
 function NpcAttackSensor.collect(player, tracker, frame, config)
     if not config.hazardNpcAttacks then
+        if tracker.count > 0 then tracker:clear() end
+        return
+    end
+
+    -- If animDB failed to load, no coverage: clear and return
+    if not animDB then
         if tracker.count > 0 then tracker:clear() end
         return
     end
@@ -145,23 +159,31 @@ function NpcAttackSensor.collect(player, tracker, frame, config)
     local count = 0
     for i = 1, #entities do
         local e = entities[i]
-        -- 只检查活跃敌方 NPC
         local okNpc, isNpc = pcall(function()
             return e:ToNPC() ~= nil and e:IsActiveEnemy() and not e:IsDead()
                 and not e:HasEntityFlags(EntityFlag.FLAG_FRIENDLY)
         end)
         if okNpc and isNpc then
-            local okDetect, attack = pcall(detectAttack, e)
-            if okDetect and attack then
-                count = count + 1
-                entries[count] = {
-                    index = e.Index + 10000, -- 偏移避免与实体 Index 冲突
-                    pos = attack.pos,
-                    vel = attack.vel,
-                    speed = attack.speed,
-                    radius = attack.radius,
-                    kind = attack.kind,
-                }
+            local animLower = safeAnimationLower(e)
+            if animLower ~= "" and not isExcludedAnimation(animLower) then
+                local attackEntry = findAttackEntry(e.Type, e.Variant, animLower)
+                if attackEntry then
+                    local okBuild, entry = pcall(buildEntry, e, attackEntry, frame)
+                    if okBuild and entry then
+                        count = count + 1
+                        entries[count] = {
+                            index = e.Index + 10000, -- offset to avoid collision with entity Index
+                            pos = entry.pos,
+                            vel = entry.vel,
+                            speed = entry.speed,
+                            radius = entry.radius,
+                            kind = entry.kind,
+                            -- Tier 1 fields (transparent passthrough to tracker)
+                            fuseFrames = entry.fuseFrames,
+                            appearFrame = entry.appearFrame,
+                        }
+                    end
+                end
             end
         end
     end
@@ -170,7 +192,7 @@ function NpcAttackSensor.collect(player, tracker, frame, config)
 end
 
 function NpcAttackSensor.resetRoom()
-    -- 无状态，预留接口
+    -- No state to reset (stateless sensor)
 end
 
 return NpcAttackSensor
