@@ -152,7 +152,9 @@ function ThreatLevel.evaluate(state, deps, frame)
     -- 墙壁+敌人复合威胁：贴墙且附近有敌人时，强制 AI 介入推离墙壁
     -- （卡墙问题的核心修复：单纯靠碰撞检测不够，需要主动远离墙壁）
     if deps.terrain.valid and threat.enemyCount > 0 then
-        local wallDist = deps.terrain:minWallDistance(player.position)
+        -- deps.wallDist: main 每帧统一算好传入（省一次重复计算）；缺省自行计算
+        local wallDist = deps.wallDist
+            or deps.terrain:minWallDistance(player.position)
         if wallDist < config.wallStuckThreshold then
             local wallUrgency = mathext.remap(wallDist, 0, config.wallStuckThreshold, 0.5, 0.1)
             urgency = math.max(urgency, wallUrgency)
@@ -160,8 +162,11 @@ function ThreatLevel.evaluate(state, deps, frame)
         end
     end
 
-    -- 综合：密度威胁乘 0.7（密度不如碰撞紧急，但更早触发，原则6）
-    threat.level = math.max(urgency, densityScore * 0.7)
+    -- 综合：密度威胁权重由 anticipateStrength 驱动（MCM"提前规避强度"0-10，
+    -- remap 到 0.3-1.2；此前硬编码 0.7 导致该配置为死参数——挂机站桩被围时
+    -- 密度分数不够 0.25 阈值，AI 全程不介入，实测 2026-09-08 站桩 40 帧磨死）
+    local densityWeight = mathext.remap(config.anticipateStrength or 5, 0, 10, 0.3, 1.2)
+    threat.level = math.max(urgency, densityScore * densityWeight)
 
     return threat.level
 end

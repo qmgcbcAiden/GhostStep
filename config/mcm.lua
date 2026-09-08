@@ -48,8 +48,8 @@ local SETTINGS = {
     { "录制", "deathReplayEnabled", "bool",   true,  "死亡自动回放" },
     { "录制", "replayBufferSeconds", "number", 30,   min = 10, max = 120, step = 10,
       suffix = " 秒", info = "回放缓冲大小" },
-    { "录制", "snapshotDetail",      "number", 2,    min = 1, max = 3, step = 1,
-      names = { "最小", "标准", "详细" }, info = "快照详情级别" },
+    { "录制", "snapshotDetail",      "number", 2,    min = 1, max = 4, step = 1,
+      names = { "最小", "标准", "详细", "全量" }, info = "快照详情级别（全量=逐威胁明细+候选评分，文件较大）" },
     -- 调试
     { "调试", "observationMode",    "bool", false, "观察模式: 只采集不控制" },
     { "调试", "profilerEnabled",    "bool", false, "性能分析器" },
@@ -142,6 +142,7 @@ end
 
 local function onChange(attr, value)
     local config = stateRef.config
+    local prev = config[attr]
     -- MCM 值 → Config 值
     if attr == "maxDodgeWeight" then
         config.maxDodgeWeight = value / 100
@@ -154,6 +155,14 @@ local function onChange(attr, value)
     -- 副作用
     local effect = SIDE_EFFECTS[attr]
     if effect then effect(stateRef, value) end
+    -- 配置变更事件: 录制文件中留痕（离线 A/B 对比把差异归因到参数变更；
+    -- preset 会级联改多个参数，按 preset 单键记录即可复现）
+    if config[attr] ~= prev then
+        local sr = stateRef.sessionRecorder
+        if sr and sr.file then
+            sr:event({ ev = "cfg", k = attr, v = config[attr] })
+        end
+    end
     -- 持久化
     MCM.saveSettings()
 end
@@ -313,8 +322,8 @@ function MCM.register(deps)
         local a = stateRef.hitAttribution
         if not a or a.total == 0 then return "受击归因: 本局无受击" end
         return string.format(
-            "受击归因(%d次): 未检测%d 太晚%d 方向%d 权重%d 不及%d",
-            a.total, a.undetected, a.late, a.wrongDir, a.lowWeight, a.tooFast)
+            "受击归因(%d次): 未检测%d 太晚%d 方向%d 权重%d 受阻%d 不及%d",
+            a.total, a.undetected, a.late, a.wrongDir, a.lowWeight, a.blocked, a.tooFast)
     end)
     -- 文件输出状态（--luadebug 说明）
     ModConfigMenu.AddText(CAT, "录制", function()

@@ -13,6 +13,12 @@ local _enemyLastCount = -1
 -- 特殊实体类型（auto_dodge 验证值）
 local TYPE_ULTRA_GREED_COIN = 293 -- Ultra Greed 扔的硬币，有接触伤害
 local TYPE_WIZOOB = 219           -- 幽灵敌人，appear 动画时无接触伤害
+local TYPE_FIREPLACE = 33         -- 火堆：静态接触伤害，火焰范围 >> entity.Size
+
+-- 火堆火焰伤害半径（像素，经验值）：火堆实际烫伤范围约为 Size 的 2.5 倍，
+-- 用 entity.Size 判定会漏（实测 2026-09-08：站视觉火焰内 hit=-1 被磨死）
+local FIREPLACE_RADIUS_MIN = 30
+local FIREPLACE_RADIUS_SCALE = 2.5
 
 --- 安全读取动画名称（小写）
 local function safeAnimLower(entity)
@@ -24,11 +30,20 @@ local function safeAnimLower(entity)
 end
 
 --- 是否为接触威胁（活着且有敌意的 NPC 本体）
+--- 返回: true/false，或 "fireplace"（火堆特判，radius 需放大）
 local function isContactThreat(e)
     -- 特殊类型：Ultra Greed 硬币直接视为接触威胁（可能没有 ToNPC）
     if e.Type == TYPE_ULTRA_GREED_COIN then
         local okDead, dead = pcall(function() return e:IsDead() end)
         return not (okDead and dead)
+    end
+
+    -- 特殊类型：火堆——静态接触伤害源。不走 ToNPC/IsActiveEnemy 通道
+    -- （火堆可能两者都不满足），只查 IsDead；radius 在采集处放大
+    if e.Type == TYPE_FIREPLACE then
+        local okDead, dead = pcall(function() return e:IsDead() end)
+        if okDead and dead then return false end
+        return "fireplace"
     end
 
     local okNpc, npc = pcall(function() return e:ToNPC() end)
@@ -70,14 +85,20 @@ function EnemySensor.collect(player, tracker, frame, config)
     local count = 0
     for i = 1, #entities do
         local e = entities[i]
-        if isContactThreat(e) then
+        local threatKind = isContactThreat(e)
+        if threatKind then
             count = count + 1
+            local radius = e.Size
+            if threatKind == "fireplace" then
+                -- 火焰伤害范围 >> entity.Size：放大判定圈，站火焰内即危险
+                radius = math.max(radius * FIREPLACE_RADIUS_SCALE, FIREPLACE_RADIUS_MIN)
+            end
             entries[count] = {
                 index = e.Index,
                 pos = e.Position,
                 vel = e.Velocity,
                 speed = e.Velocity:Length(),
-                radius = e.Size,
+                radius = radius,
                 -- 接触伤害值（auto_dodge: entity.CollisionDamage or 1；读不到按 1 保守处理）
                 damage = (function()
                     local okCd, cd = pcall(function() return e.CollisionDamage end)

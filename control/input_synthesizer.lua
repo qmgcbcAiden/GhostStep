@@ -15,12 +15,19 @@ local mathext = require("utils/math_ext")
 
 --- 权重 S 曲线映射（4.5节）
 --- threatLevel → w ∈ [0, maxW]
-local function weightFor(threatLevel, config, wallDist)
+--- inDangerZone: 当前帧已与威胁重叠（hit=0，如被敌人围住）。
+---   此时墙角钳制减半放宽（0.3→0.6）：原则5的本意是"卡墙时让玩家自己挣脱"，
+---   但被围+不操作=必掉血，逃命优先（配合 fallback 的远离墙壁偏向选朝房间中心的方向）
+local function weightFor(threatLevel, config, wallDist, inDangerZone)
     local maxW = config.maxDodgeWeight
 
     -- 原则5第二层：靠墙 → 挣脱模式，大幅降权
     if wallDist < config.wallStuckThreshold then
-        maxW = math.min(maxW, config.wallEscapeWeight)
+        local cap = config.wallEscapeWeight
+        if inDangerZone then
+            cap = math.min(config.maxDodgeWeight, cap * 2)
+        end
+        maxW = math.min(maxW, cap)
     end
 
     -- S 曲线：从 threatLow 到 threatHigh 平滑爬升
@@ -31,14 +38,15 @@ end
 --- 主入口：合成输出方向
 --- playerInput: 玩家原始输入向量（长度0~√2，可为零向量=站立）
 --- dodgeDir:    AI闪避方向（归一化）或 nil
+--- inDangerZone: 可选，当前帧已与威胁重叠（hit=0），被围时放宽墙角钳制
 --- 返回: 合成方向 Vector（长度≤1），本帧权重 w
-function InputSynthesizer.synthesize(playerInput, dodgeDir, threatLevel, config, wallDist)
+function InputSynthesizer.synthesize(playerInput, dodgeDir, threatLevel, config, wallDist, inDangerZone)
     -- 无闪避方向或无威胁 → 纯玩家输入
     if not dodgeDir or threatLevel < config.threatLow then
         return playerInput, 0
     end
 
-    local w, cappedMax = weightFor(threatLevel, config, wallDist)
+    local w = weightFor(threatLevel, config, wallDist, inDangerZone)
     if w <= 0 then
         return playerInput, 0
     end

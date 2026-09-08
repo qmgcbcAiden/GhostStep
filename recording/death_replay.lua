@@ -27,11 +27,23 @@ function DeathReplay.dumpLines(ringBuffer, seconds)
         local s = recent[i]
         if s.threat and s.threat > dangerPeak then dangerPeak = s.threat end
         if s.layer ~= "none" then activeCount = activeCount + 1 end
+        -- 附加威胁类型计数（非零才打，避免行过长）——分析漏判时定位是哪类传感器
+        local extra = ""
+        if (s.laser or 0) > 0 then extra = extra .. " 激光" .. s.laser end
+        if (s.bomb or 0) > 0 then extra = extra .. " 炸弹" .. s.bomb end
+        if (s.effect or 0) > 0 then extra = extra .. " 效果" .. s.effect end
+        if (s.npcatk or 0) > 0 then extra = extra .. " 前兆" .. s.npcatk end
+        local hpTxt = s.hp ~= nil and (" hp=" .. s.hp) or ""
+        -- 墙距（blocked/lowWeight 归因复核：贴墙时 w 低是钳制、w 高还挨打是被挡）
+        local wallTxt = ""
+        if s.wallDist ~= nil and s.wallDist >= 0 and s.wallDist < 9000 then
+            wallTxt = " wall=" .. string.format("%.0f", s.wallDist)
+        end
         lines[#lines + 1] = string.format(
-            "[GhostStep3] f%d room%d | threat=%.2f hit=%s proj=%d enemy=%s layer=%s w=%.2f pos=(%.0f,%.0f)",
+            "[GhostStep3] f%d room%d | threat=%.2f hit=%s proj=%d enemy=%s layer=%s w=%.2f pos=(%.0f,%.0f)%s%s%s",
             s.frame or -1, s.room or -1, s.threat or 0, tostring(s.hitFrame or -1),
             s.proj or 0, tostring(s.enemy or 0), s.layer or "?", s.weight or 0,
-            s.px or 0, s.py or 0)
+            s.px or 0, s.py or 0, hpTxt, extra, wallTxt)
     end
 
     lines[#lines + 1] = string.format("[GhostStep3] 回放统计: 峰值威胁=%.2f 决策活跃帧=%d/%d",

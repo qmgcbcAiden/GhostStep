@@ -20,6 +20,7 @@ function Runtime.create(config)
         -- 房间
         currentRoomIndex = -1,
         roomCommitPending = false, -- 房间切换延迟提交标记（模式6）
+        inCombat = false,          -- 当前房间是否有活敌（录制 cmb 字段用）
 
         -- 玩家
         player = {
@@ -30,6 +31,8 @@ function Runtime.create(config)
             velocity = Vector(0, 0),
             inputDir = Vector(0, 0),   -- 本帧玩家原始输入方向（归一化前）
             radius = 10,
+            hp = nil,                  -- 红心+魂心总量（HP 轮询受伤兜底基线）
+            wasInvincible = false,     -- 上帧无敌状态（上升沿=刚受伤）
         },
 
         -- 威胁评估输出
@@ -58,6 +61,7 @@ function Runtime.create(config)
             late = 0,       -- 检测太晚：威胁中等但介入不足（灵敏度/提前量）
             wrongDir = 0,   -- 方向错误：闪避方向朝伤害来源（评分权重问题）
             lowWeight = 0,  -- 权重不足：方向对但被墙角钳制（原则5权衡）
+            blocked = 0,    -- 位移受阻：AI输出满速但实际不动（墙/人墙，需中期规划）
             tooFast = 0,    -- 反应时间不足：高威胁高权重仍被打（预测窗口）
             total = 0,
         },
@@ -70,6 +74,7 @@ function Runtime.create(config)
             holdFramesLeft = 0, -- 方向保持剩余帧
             usedBudgetMs = 0,   -- 本帧决策耗时
             degraded = false,   -- 本帧是否采样降级
+            lastTrace = nil,    -- 候选评分 trace（级别4录制用，Fallback 填充）
         },
 
         -- 控制（MC_INPUT_ACTION 读取）
@@ -78,6 +83,7 @@ function Runtime.create(config)
             direction = Vector(0, 0), -- 合成后的输出方向
             weight = 0,         -- 本帧权重
             frame = -1,         -- 决策帧号（超时失效保护）
+            wallDist = -1,      -- 本帧玩家离墙距离（9999=地形无效；录制/归因共用）
         },
 
         -- 性能
@@ -93,6 +99,7 @@ function Runtime.onNewRoom(state)
     state.control.active = false
     state.control.direction = Vector(0, 0)
     state.control.weight = 0
+    state.control.wallDist = -1
     state.threat.level = 0
     state.threat.collisionUrgency = 0
     state.threat.densityScore = 0
@@ -102,6 +109,26 @@ function Runtime.onNewRoom(state)
     state.decision.dodgeDir = nil
     state.decision.dodgeDirPrev = nil
     state.decision.holdFramesLeft = 0
+    state.decision.lastTrace = nil
+end
+
+--- 闪避挂起（ALT 关/总开关关/玩家无效）时清威胁与决策残影
+--- 威胁评估不运行的帧，录制快照必须记零值而不是上一帧残影
+function Runtime.suspendThreat(state)
+    local t = state.threat
+    t.level = 0
+    t.collisionUrgency = 0
+    t.densityScore = 0
+    t.framesUntilHit = -1
+    t.gradientDir = nil
+    t.hitKind, t.hitDamage, t.hitDist = nil, nil, nil
+    t.projectileCount, t.enemyCount, t.hazardCount = 0, 0, 0
+    t.laserCount, t.bombCount, t.effectCount, t.npcAttackCount = 0, 0, 0, 0
+    state.decision.layer = "none"
+    state.decision.dodgeDir = nil
+    state.decision.lastTrace = nil
+    state.control.active = false
+    state.control.wallDist = -1
 end
 
 --- 判定是否真正启用（总开关 AND ALT 开关 AND 非观察模式）

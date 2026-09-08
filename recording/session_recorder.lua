@@ -85,7 +85,8 @@ function SessionRecorder.unavailableReason(self)
 end
 
 --- 开始一个新录制会话（每局一个文件）
-function SessionRecorder.startSession(self, seedString)
+--- seedString: 种子；meta: 可选 {char=角色类型, stage=开局层数}
+function SessionRecorder.startSession(self, seedString, meta)
     if not self.available then return false end
     self:closeFile()
 
@@ -107,7 +108,12 @@ function SessionRecorder.startSession(self, seedString)
         self.lineCount = 0
         self.framesSinceFlush = 0
         self.totalFrames = 0
-        self:writeLine('{"ev":"session_start","seed":"' .. tostring(seedString or "") .. '"}')
+        local head = '{"ev":"session_start","seed":"' .. tostring(seedString or "") .. '"'
+        if meta then
+            if meta.char ~= nil then head = head .. ',"char":' .. tostring(meta.char) end
+            if meta.stage ~= nil then head = head .. ',"stage":' .. tostring(meta.stage) end
+        end
+        self:writeLine(head .. "}")
         self:flush()
         Isaac.DebugString("[GhostStep3] 录制文件: " .. path)
         return true
@@ -151,19 +157,32 @@ function SessionRecorder.push(self, snapshot, jsonEncoder)
     end
 end
 
---- 记录事件（hit/death/room），立即刷盘
+--- 记录事件（hit/death/room/level/cfg变更），立即刷盘
+--- 数字: 整数写整数（frame=123 而非 123.00），小数保留两位
 function SessionRecorder.event(self, fields)
     if not self.file then return end
     local parts = {}
     for k, v in pairs(fields or {}) do
         if type(v) == "number" then
-            parts[#parts + 1] = '"' .. k .. '":' .. string.format("%.2f", v)
+            local fmt = (v == math.floor(v)) and "%.0f" or "%.2f"
+            parts[#parts + 1] = '"' .. k .. '":' .. string.format(fmt, v)
         else
             parts[#parts + 1] = '"' .. k .. '":"' .. tostring(v) .. '"'
         end
     end
     self:writeLine('{' .. table.concat(parts, ",") .. "}")
     self:flush()
+end
+
+--- 记录任意嵌套表事件（如开局 cfg 完整 dump），立即刷盘
+--- obj 需含 ev 字段；jsonEncoder = json.encode
+function SessionRecorder.eventJson(self, obj, jsonEncoder)
+    if not self.file or not jsonEncoder then return end
+    local ok, line = pcall(jsonEncoder, obj)
+    if ok and type(line) == "string" then
+        self:writeLine(line)
+        self:flush()
+    end
 end
 
 --- 关闭文件

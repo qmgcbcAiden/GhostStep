@@ -449,7 +449,7 @@ end)
 local EnemySensor = require("sensors/enemies")
 local function mockNpc(overrides)
     local e = {
-        Type = 33, Index = 500, Position = Vector(40, 0),
+        Type = 42, Index = 500, Position = Vector(40, 0), -- 42=普通敌型（勿用33=火堆，会走特判分支）
         Velocity = Vector(-3, 0), Size = 12, SpawnerType = 0,
         ToNPC = function() return {} end,
         IsDead = function() return false end,
@@ -529,6 +529,119 @@ check("session recorder degrades without io/debug path", function()
     assert(type(text) == "string" and #text > 0, "statusText ok")
     -- 不带 jsonEncoder 的 push（json 加载失败场景）也不崩
     sr:push({ frame = 2 }, nil)
+end)
+
+-- ===== snapshot 两阶段采集（时序修复回归: 决策字段必须是 finalize 时刻的值）=====
+local Snapshot = require("recording/snapshot")
+check("snapshot two-phase capture/finalize", function()
+    local st = {
+        currentRoomIndex = 5, inCombat = true,
+        player = { position = Vector(10, 20), velocity = Vector(1, 2),
+            inputDir = Vector(0, 0), hp = 6, canFly = false },
+        threat = { level = 0, projectileCount = 0, enemyCount = 0, framesUntilHit = -1,
+            collisionUrgency = 0, densityScore = 0 },
+        decision = { layer = "none", dodgeDir = nil, holdFramesLeft = 0,
+            usedBudgetMs = 0, degraded = false, lastTrace = nil },
+        control = { weight = 0, direction = Vector(0, 0), wallDist = -1 },
+        profiler = { lastFrameMs = 0 },
+    }
+    local snap = Snapshot.capture(st, 100, 3)
+    assert(snap.px == 10 and snap.py == 20 and snap.hp == 6, "capture: 位置/血量")
+    assert(snap.vx == 1 and snap.vy == 2 and snap.cmb == 1, "capture: 速度/战斗标志")
+    assert(snap.canFly == false, "capture: canFly")
+    assert(snap.threat == nil, "threat 必须由 finalize 填（管线后才有本帧值）")
+    assert(snap.layer == nil, "决策字段必须由 finalize 填")
+    -- 模拟 capture 与 finalize 之间运行的威胁评估+决策管线
+    st.threat.level = 0.8
+    st.threat.projectileCount = 3
+    st.threat.framesUntilHit = 4
+    st.threat.collisionUrgency = 0.9
+    st.player.inputDir = Vector(1, 0)
+    st.decision.layer = "escape_lock"
+    st.decision.dodgeDir = Vector(1, 0)
+    st.control.weight = 0.7
+    st.control.direction = Vector(0.5, 0)
+    st.control.wallDist = 42
+    st.profiler.lastFrameMs = 0.55
+    Snapshot.finalize(snap, st, 3, nil, {})
+    assert(snap.threat == 0.8 and snap.proj == 3, "finalize: 本帧威胁值")
+    assert(snap.layer == "escape_lock" and snap.weight == 0.7, "finalize: 本帧决策值")
+    assert(snap.dx == 1 and snap.dy == 0, "finalize: 闪避方向")
+    assert(snap.ix == 1 and snap.iy == 0, "finalize: 本帧输入")
+    assert(snap.wallDist == 42 and snap.frameMs == 0.55, "finalize: 墙距/帧耗时")
+    assert(snap.cx == 0.5 and snap.cy == 0, "finalize: 合成输出")
+    assert(snap.degraded == 0 and snap.holdFrames == 0, "finalize: 降级/保持帧")
+end)
+
+check("snapshot detail4 hazard trace (排序/截断/相对坐标)", function()
+    local st = {
+        currentRoomIndex = 1, inCombat = true,
+        player = { position = Vector(100, 100), velocity = Vector(0, 0),
+            inputDir = Vector(0, 0), hp = 3, canFly = false },
+        threat = { level = 0.5, projectileCount = 1, enemyCount = 1, framesUntilHit = -1 },
+        decision = { layer = "fallback", dodgeDir = Vector(0, 1), holdFramesLeft = 2,
+            lastTrace = { cand = { { a = 90, s = -1.5 } }, best = -1.5 } },
+        control = { weight = 0.5, direction = Vector(0, 0.5), wallDist = 50 },
+        profiler = { lastFrameMs = 0.4 },
+    }
+    -- 距离: 炸弹20 < 敌人30 < 弹幕50 < 远弹320(超出半径排除)；cap=2 只留前两个
+    local hazards = {
+        { pos = Vector(150, 100), vel = Vector(-5, 0), radius = 8, kind = "projectile" },
+        { pos = Vector(120, 100), vel = Vector(0, 0), radius = 18, kind = "bomb",
+          variant = 0, damage = 12 },
+        { pos = Vector(100, 130), vel = Vector(1, -1), radius = 12, kind = "enemy" },
+        { pos = Vector(420, 100), vel = Vector(0, 0), radius = 8, kind = "projectile" },
+    }
+    local snap = Snapshot.capture(st, 200, 4)
+    Snapshot.finalize(snap, st, 4, hazards,
+        { traceHazardMax = 2, traceHazardRadius = 300 })
+    assert(snap.hz and #snap.hz == 2, "hz 数量(cap=2): " .. tostring(snap.hz and #snap.hz))
+    assert(snap.hz[1][1] == "b", "最近的是炸弹")
+    assert(snap.hz[1][3] == 20 and snap.hz[1][4] == 0, "炸弹相对坐标(20,0)")
+    assert(snap.hz[1][7] == 18 and snap.hz[1][8] == 12, "炸弹半径/伤害透传")
+    assert(snap.hz[2][1] == "e", "第二近的是敌人")
+    assert(snap.hz[2][2] == -1, "无 variant 默认 -1")
+    assert(snap.cand and snap.cand[1].a == 90, "候选评分复制")
+    assert(snap.bestScore == -1.5, "最优分复制")
+end)
+
+check("fallback trace out (级别4候选评分留痕)", function()
+    local tracker = Tracker2.create()
+    tracker:update({ { index = 1, pos = Vector(60, 0), vel = Vector(-10, 0), speed = 10, radius = 8 } }, 0, "projectile")
+    local state = {
+        player = { position = Vector(0, 0), velocity = Vector(0, 0), radius = 10,
+                   inputDir = Vector(1, 0) },
+        decision = {}, threat = {},
+    }
+    local trace = {}
+    local dir = Fallback.compute(state, {
+        config = config, tracker = tracker,
+        getHazards = function() return tracker:getActive(2, 0) end,
+        hazardQuery = nil, terrain = Terrain.create(),
+    }, 0, trace)
+    assert(dir, "produced direction")
+    assert(trace.cand and #trace.cand == 6, "top6 候选: " .. tostring(trace.cand and #trace.cand))
+    for i = 1, #trace.cand do
+        local c = trace.cand[i]
+        assert(type(c.a) == "number" and type(c.s) == "number", "候选字段 a/s")
+    end
+    assert(trace.cand[1].s <= trace.cand[6].s, "候选按分数升序")
+    assert(type(trace.best) == "number", "最优分已填")
+    -- 不传 traceOut（旧调用方式）依然正常
+    local dir2 = Fallback.compute(state, {
+        config = config, tracker = tracker,
+        getHazards = function() return tracker:getActive(2, 0) end,
+        hazardQuery = nil, terrain = Terrain.create(),
+    }, 0)
+    assert(dir2, "无 traceOut 兼容")
+end)
+
+check("ring buffer nested hz tables", function()
+    local rb = RingBuffer.create(3)
+    rb:push({ frame = 1, hz = { { "p", 9, 1, 2, -5, 0, 8, 1 } }, cand = { { a = 90, s = -1 } } })
+    local recent = rb:getRecent(1)
+    assert(recent[1].hz[1][1] == "p" and recent[1].hz[1][3] == 1, "嵌套 hz 表保留")
+    assert(recent[1].cand[1].a == 90, "嵌套 cand 表保留")
 end)
 
 -- ===== laser/bomb/effect sensor 采集 + 碰撞分流 =====
@@ -758,6 +871,54 @@ check("bomb fuse urgency: imminent explosion dominates (batch1)", function()
     assert(state.threat.collisionUrgency >= 0.9,
         "fuse urgency=" .. tostring(state.threat.collisionUrgency))
     assert(state.threat.hitKind == "bomb", "hitKind=" .. tostring(state.threat.hitKind))
+end)
+
+-- ===== 实测分析修复回归：effect 伤害兜底 + 被围钳制放宽 =====
+
+check("effect sensor: unclassified variant with CollisionDamage captured", function()
+    local trk = Tracker.create()
+    SMOKE.entities = {
+        -- variant 1 (未分类，如爆炸特效) 但有伤害 → 必须采集（"Killed by (10.1)" 兜底）
+        { Type = 1000, Index = 830, Position = Vector(70, 0), Velocity = Vector(0, 0),
+          Size = 10, Variant = 1, CollisionDamage = 3, IsDead = function() return false end },
+        -- variant 99 无伤害无分类 → 忽略
+        { Type = 1000, Index = 831, Position = Vector(80, 0), Velocity = Vector(0, 0),
+          Size = 10, Variant = 99, IsDead = function() return false end },
+    }
+    EffectSensor.collect(nil, trk, 10, { hazardCreep = true })
+    assert(trk.count == 1, "damage fallback: count=" .. trk.count)
+    assert(trk.tracked[830], "damaging effect tracked")
+    assert(not trk.tracked[831], "harmless unknown variant skipped")
+    assert(trk.tracked[830].damage == 3, "damage field carried")
+    SMOKE.entities = {}
+end)
+
+check("synth: wall cap relaxed when in danger zone", function()
+    local cfg = require("config/defaults").get()
+    -- 靠墙 + 高威胁：正常钳到 0.3
+    local _, w1 = InputSynthesizer.synthesize(Vector(0, 0), Vector(1, 0), 1.0, cfg, 10)
+    assert(math.abs(w1 - 0.3) < 0.001, "normal wall cap=0.3, got " .. tostring(w1))
+    -- 靠墙 + 高威胁 + 被围（hit=0）：放宽到 0.6（逃命优先）
+    local _, w2 = InputSynthesizer.synthesize(Vector(0, 0), Vector(1, 0), 1.0, cfg, 10, true)
+    assert(math.abs(w2 - 0.6) < 0.001, "danger zone wall cap=0.6, got " .. tostring(w2))
+end)
+
+check("enemy sensor: fireplace captured with enlarged flame radius", function()
+    local trk = Tracker.create()
+    SMOKE.entities = {
+        -- 火堆: Size=11 但火焰伤害范围 ~2.5x → 判定圈必须放大
+        { Type = 33, Index = 840, Position = Vector(100, 0), Velocity = Vector(0, 0),
+          Size = 11, IsDead = function() return false end },
+        -- 灰烬火堆（已熄灭）排除
+        { Type = 33, Index = 841, Position = Vector(110, 0), Velocity = Vector(0, 0),
+          Size = 11, IsDead = function() return true end },
+    }
+    EnemySensor.collect(nil, trk, 10, { hazardContact = true })
+    assert(trk.count == 1, "fireplace tracked: count=" .. trk.count)
+    local fp = trk.tracked[840]
+    assert(fp.radius >= 30, "flame radius enlarged, got " .. tostring(fp.radius))
+    assert(not trk.tracked[841], "dead fireplace excluded")
+    SMOKE.entities = {}
 end)
 
 -- ===== 输出结果 =====

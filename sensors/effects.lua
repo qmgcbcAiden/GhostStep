@@ -81,7 +81,11 @@ function EffectSensor.collect(player, tracker, frame, config)
     for i = 1, #entities do
         local e = entities[i]
         local variant = safeGet(e, function(x) return x.Variant end, -1)
-        if isThreatEffect(variant) then
+        -- 伤害值（auto_dodge 模式: effect.CollisionDamage or entity.CollisionDamage or 0）
+        local damage = safeGet(e, function(x) return x.CollisionDamage or 0 end, 0)
+        if isThreatEffect(variant) or damage > 0 then
+            -- 兜底：未分类 variant 但带 CollisionDamage 的效果也算威胁
+            -- （"Killed by (10.1)" 类爆炸特效就在这层被接住，避免漏判）
             local isDead = safeGet(e, function(x) return x:IsDead() end, true)
             if not isDead then
                 count = count + 1
@@ -98,6 +102,7 @@ function EffectSensor.collect(player, tracker, frame, config)
                     radius = radius,
                     kind = "effect",
                     variant = variant,
+                    damage = damage > 0 and damage or 1,
                 }
             end
         end

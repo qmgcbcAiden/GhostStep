@@ -19,6 +19,8 @@ function EscapeLock.create()
         framesLeft = 0,       -- 锁定剩余帧
         lastDir = nil,        -- 上一次锁定方向（记忆混合用）
         lastActiveFrame = -9999,
+        lastPos = nil,        -- 上帧玩家位置（卡死检测用）
+        stuckFrames = 0,      -- 连续位移过小的帧数
     }
     return setmetatable(self, { __index = EscapeLock })
 end
@@ -31,12 +33,33 @@ function EscapeLock.applies(conditions)
 end
 
 --- 处理一帧。baseDirFn() 返回当前最优逃离方向（通常为 Fallback.compute）
+--- playerPos: 可选，本帧玩家位置——锁定期内实际位移过小（顶墙/顶人墙）连续3帧
+---   → 强制提前解锁并清空方向记忆，让 fallback 的远离墙壁偏向接管
 --- 返回本帧使用的方向（Vector 或 nil）
-function EscapeLock.process(self, frame, baseDirFn)
+function EscapeLock.process(self, frame, baseDirFn, playerPos)
     -- 锁定期内：保持方向（期间不重新评估，防止抖动）
     if self.framesLeft > 0 and self.lockedDir then
         self.framesLeft = self.framesLeft - 1
-        return self.lockedDir
+        -- 卡死检测（实测 2026-09-08：被围时 x 钉墙 160 帧，锁死方向顶着墙走不动）
+        if playerPos then
+            if self.lastPos and playerPos:Distance(self.lastPos) < 1.5 then
+                self.stuckFrames = self.stuckFrames + 1
+                if self.stuckFrames >= 3 then
+                    -- 撞墙撞人墙：解锁 + 清记忆（记忆混合的不动点会让墙向方向反复胜出）
+                    self.lockedDir = nil
+                    self.lastDir = nil
+                    self.framesLeft = 0
+                    self.stuckFrames = 0
+                end
+            else
+                self.stuckFrames = 0
+            end
+            self.lastPos = playerPos
+        end
+        if self.lockedDir then
+            return self.lockedDir
+        end
+        -- 强制解锁后本帧立刻重评（走下方 baseDirFn 路径）
     end
 
     local dir = baseDirFn()
@@ -71,6 +94,8 @@ function EscapeLock.reset(self)
     self.framesLeft = 0
     self.lastDir = nil
     self.lastActiveFrame = -9999
+    self.lastPos = nil
+    self.stuckFrames = 0
 end
 
 return EscapeLock
