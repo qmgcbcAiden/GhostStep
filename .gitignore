@@ -1,8 +1,8 @@
 # 第三方参考 mod（含旧仓库完整 .git，勿提交）
 references/
 
-# 运行时生成的会话录像数据
-recording/*.jsonl
+# 运行时生成的回放数据（mod 根目录专属数据文件夹）
+recordings/
 
 # Claude Code 本地配置
 .claude/settings.local.json

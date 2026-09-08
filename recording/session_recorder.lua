@@ -5,7 +5,9 @@
 --   (Steam → 以撒 → 属性 → 启动选项填 --luadebug)
 -- 降级策略: io 不可用时静默退回纯内存环形缓冲（现状），MCM 录制页会显示原因
 --
--- 输出: <mod目录>/recordings/session_<时间戳>_<种子>.jsonl（目录不可建时退回 mod 根目录）
+-- 输出: <mod根>/recordings/session_<时间戳>_<种子>.jsonl
+--   mod根 = 从脚本位置向上找到 metadata.xml 的目录（不硬编码任何机器路径）
+--   recordings/ 为录制数据专属目录，与代码目录完全隔离；建不出来时退回内存模式
 --   每帧一行 JSON（Snapshot.capture 的平铺表）
 --   事件行: {"ev":"hit"/"death"/"room"/"session_start", ...}
 --
@@ -24,13 +26,36 @@ local function ioAvailable()
     return ok and res
 end
 
---- 定位 mod 自身目录（--luadebug 下 debug.getinfo 的 source 是 @绝对路径）
+--- 定位脚本自身目录（--luadebug 下 debug.getinfo 的 source 是 @绝对路径）
 local function scriptDirectory()
     local ok, info = pcall(function() return debug.getinfo(1, "S") end)
     if not ok or info == nil or info.source == nil then return nil end
     local source = info.source
     if string.sub(source, 1, 1) ~= "@" then return nil end
     return string.match(string.sub(source, 2), "^(.*)[/\\][^/\\]+$")
+end
+
+--- 从脚本目录向上找 metadata.xml（每个 Isaac mod 根目录必有），定位 mod 根
+--- 最多向上 4 层，兼容未来脚本层级调整；找不到返回 nil（退回内存模式）
+local function modRootDirectory()
+    local dir = scriptDirectory()
+    for _ = 1, 4 do
+        if dir == nil then return nil end
+        local okOpen, f = pcall(io.open, dir .. "\\metadata.xml", "r")
+        if okOpen and f ~= nil then
+            f:close()
+            return dir
+        end
+        dir = string.match(dir, "^(.*)[/\\][^/\\]+$")
+    end
+    return nil
+end
+
+--- 确保目录存在（Lua 无 mkdir，借 os.execute 调系统命令；已存在时静默）
+local function ensureDirectory(path)
+    return pcall(function()
+        os.execute('md "' .. path .. '" >nul 2>&1')
+    end)
 end
 
 --- 创建实例
@@ -46,7 +71,7 @@ function SessionRecorder.create()
         dir = nil,
     }
     if self.available then
-        self.dir = scriptDirectory()
+        self.dir = modRootDirectory()
         if self.dir == nil then
             self.available = false
         end
@@ -69,28 +94,26 @@ function SessionRecorder.startSession(self, seedString)
     if okT and type(res) == "string" then stamp = res end
     local safeSeed = string.gsub(tostring(seedString or ""), "[^%w]", "")
 
-    -- Lua 无 mkdir：先试 recordings/ 子目录（上次手动建过/其他工具建过），失败退回 mod 根
-    local candidates = {
-        self.dir .. "\\recordings\\session_" .. stamp .. "_" .. safeSeed .. ".jsonl",
-        self.dir .. "\\ghoststep3_session_" .. stamp .. "_" .. safeSeed .. ".jsonl",
-    }
-    for i = 1, #candidates do
-        local okOpen, file = pcall(io.open, candidates[i], "a")
-        if okOpen and file ~= nil then
-            self.file = file
-            self.filePath = candidates[i]
-            self.lines = {}
-            self.lineCount = 0
-            self.framesSinceFlush = 0
-            self.totalFrames = 0
-            self:writeLine('{"ev":"session_start","seed":"' .. tostring(seedString or "") .. '"}')
-            self:flush()
-            Isaac.DebugString("[GhostStep3] 录制文件: " .. candidates[i])
-            return true
-        end
+    -- 专属数据目录 <mod根>/recordings/，与代码目录隔离；
+    -- 目录建不出来或不可写 → 退回内存模式，绝不写入代码所在目录
+    local recordingsDir = self.dir .. "\\recordings"
+    ensureDirectory(recordingsDir)
+    local path = recordingsDir .. "\\session_" .. stamp .. "_" .. safeSeed .. ".jsonl"
+    local okOpen, file = pcall(io.open, path, "a")
+    if okOpen and file ~= nil then
+        self.file = file
+        self.filePath = path
+        self.lines = {}
+        self.lineCount = 0
+        self.framesSinceFlush = 0
+        self.totalFrames = 0
+        self:writeLine('{"ev":"session_start","seed":"' .. tostring(seedString or "") .. '"}')
+        self:flush()
+        Isaac.DebugString("[GhostStep3] 录制文件: " .. path)
+        return true
     end
     self.available = false
-    Isaac.DebugString("[GhostStep3] 录制文件创建失败，退回内存模式")
+    Isaac.DebugString("[GhostStep3] 录制目录不可用: " .. recordingsDir .. "，退回内存模式")
     return false
 end
 
