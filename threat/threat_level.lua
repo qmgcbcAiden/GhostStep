@@ -39,7 +39,7 @@ local function computeGradient(playerPos, hazards, config)
             local speedWeight = math.max(0.3, math.min(h.speed / 10, 3))
             local weight = distWeight * speedWeight
             -- 方向 bin：以玩家为中心，弹幕在哪个方位
-            local angle = math.atan(delta.Y, delta.X)
+            local angle = (math.atan2 or math.atan)(delta.Y, delta.X)
             local bin = math.floor(((angle + math.pi) / (2 * math.pi)) * binCount) % binCount + 1
             bins[bin] = bins[bin] + weight
             totalWeight = totalWeight + weight

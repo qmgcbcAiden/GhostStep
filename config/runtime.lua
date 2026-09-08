@@ -11,6 +11,7 @@ function Runtime.create(config)
 
         -- 双帧计数器（模式7：update 30fps 暂停停止 / render 60fps 暂停继续）
         updateCount = 0,
+        logicTick = 0,
         renderCount = 0,
 
         -- 开关
@@ -96,6 +97,9 @@ end
 
 --- 房间切换时重置状态（7.5.6）
 function Runtime.onNewRoom(state)
+    Runtime.suspendThreat(state)
+    state.motion = nil
+    state.feedback = nil
     state.control.active = false
     state.control.direction = Vector(0, 0)
     state.control.weight = 0
@@ -126,8 +130,21 @@ function Runtime.suspendThreat(state)
     t.laserCount, t.bombCount, t.effectCount, t.npcAttackCount = 0, 0, 0, 0
     state.decision.layer = "none"
     state.decision.dodgeDir = nil
+    state.decision.dodgeDirPrev = nil
+    state.decision.holdFramesLeft = 0
+    state.decision.command = nil
+    state.decision.reason = "disabled"
+    state.decision.usedBudgetMs = 0
+    state.decision.degraded = false
+    state.decision.metrics = nil
+    state.decision.hazards = nil
+    state.decision.planner = nil
     state.decision.lastTrace = nil
     state.control.active = false
+    state.control.direction = Vector(0, 0)
+    state.control.weight = 0
+    state.control.frame = -1
+    state.control.hookSeen = false
     state.control.wallDist = -1
 end
 

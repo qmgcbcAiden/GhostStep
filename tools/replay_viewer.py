@@ -75,6 +75,7 @@ def parse_session(path):
     frames = []
     events = []
     bad = 0
+    context = {}
     with open(path, encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
@@ -88,7 +89,12 @@ def parse_session(path):
             if not isinstance(rec, dict):
                 bad += 1
                 continue
-            if "ev" in rec:
+            if rec.get("ev") == "context" and isinstance(rec.get("snapshot"), dict):
+                detail = rec["snapshot"]
+                key = (detail.get("tick", detail.get("frame")), detail.get("room"))
+                detail["_line"] = lineno
+                context[key] = detail
+            elif "ev" in rec:
                 rec["_line"] = lineno
                 events.append(rec)
                 if rec["ev"] == "session_start":
@@ -99,7 +105,11 @@ def parse_session(path):
             else:
                 # 无 frame 无 ev 的行（旧版本录出的 "{}" 桩）计入坏行
                 bad += 1
-    frames.sort(key=lambda r: r["frame"])
+    for record in frames:
+        key = (record.get("tick", record.get("frame")), record.get("room"))
+        record.update(context.pop(key, {}))
+    frames.extend(context.values())
+    frames.sort(key=lambda r: (r.get("tick", r["frame"]), r["frame"]))
     return seed, frames, events, bad
 
 
@@ -439,7 +449,7 @@ def dump_death_replay(frames, death_frame, seconds):
 def print_stats(frames, events):
     threats = [f.get("threat") or 0 for f in frames]
     layers = {}
-    budget = [f.get("budgetMs") for f in frames if f.get("budgetMs")]
+    budget = [f.get("budgetMs") for f in frames if f.get("budgetMs") is not None]
     for f in frames:
         layer = f.get("layer") or "?"
         layers[layer] = layers.get(layer, 0) + 1

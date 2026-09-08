@@ -12,7 +12,7 @@ function Defaults.get()
         ---------------------------------------------------------------
         enabled = true,             -- 自动躲避总开关
         toggleKey = 56,             -- 键盘键值（默认左Alt = 56）
-        preset = 2,                 -- 1安全 2平衡 3激进
+        preset = 2,                 -- 1低 2适中 3高
 
         ---------------------------------------------------------------
         -- 危险源（威胁类型开关）
@@ -29,6 +29,21 @@ function Defaults.get()
         ---------------------------------------------------------------
         -- 躲避（算法核心参数）
         ---------------------------------------------------------------
+        plannerHorizon = 18,        -- 引擎帧；需通过实机运动日志校准
+        plannerMaxCandidates = 64,
+        plannerMaxChecks = 80000,   -- 几何检查次数硬上限
+        intentPenalty = 3,
+        smoothPenalty = 0.2,
+        safetyMargin = 1.5,
+        stuckFrames = 6,
+        escapeMaxNodes = 48,
+        terrainRefreshFrames = 3,
+        eventRecording = false,    -- 可选详细前后文；日常使用轻量记录
+        eventPreFrames = 60,
+        eventPostFrames = 30,
+        eventMaxBytes = 2097152,
+        recorderMaxBytes = 1048576,
+        recorderBatchBytes = 32768,
         maxDodgeWeight = 0.85,      -- AI 权重上限（原则2：永不 1.0）
         threatLow = 0.25,           -- 低威胁阈值：低于此完全不介入（灵敏度联动：高=0.20 平衡=0.25 低=0.31）
         threatMedium = 0.45,        -- 中威胁阈值：提前规避阶段上限

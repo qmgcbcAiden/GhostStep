@@ -31,6 +31,10 @@ function PlayerSensor.collect(state, frame)
     p.position = player.Position
     p.velocity = player.Velocity
     p.radius = player.Size
+    p.moveSpeed = player.MoveSpeed or 1
+    p.controlsEnabled = player.ControlsEnabled ~= false
+    local okCd, cd = pcall(function() return player:GetDamageCooldown() end)
+    p.damageCooldown = okCd and cd or nil
     -- 注: Rep+ 无 EntityPlayer:IsDamageEnabled()；无敌状态检测留给 Phase 3（EntityFlags）
 
     return player

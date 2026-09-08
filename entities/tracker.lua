@@ -26,8 +26,11 @@ local function newEntry(entry, frame)
     -- 全字段复制（pos/vel 之外 sensors 提供的 damage/fuseFrames/endPos/angle/kind 等都要带上）
     local t = {}
     for k, v in pairs(entry) do
-        if k ~= "index" then t[k] = v end
+        t[k] = v
     end
+    t._fields = {}
+    for k in pairs(entry) do t._fields[k] = true end
+    t.id = tostring(entry.kind or "projectile") .. ":" .. tostring(entry.index) .. ":" .. tostring(entry.seed or frame)
     t.firstFrame = frame
     t.lastFrame = frame
     t.historyCount = 1
@@ -47,11 +50,20 @@ function Tracker.update(self, entries, frame, expiryKind)
         local e = entries[i]
         local t = tracked[e.index]
         seen[e.index] = true
+        if t and e.seed ~= nil and t.seed ~= e.seed then
+            tracked[e.index] = nil
+            self.count = self.count - 1
+            t = nil
+        end
         if t then
+            for k in pairs(t._fields) do
+                if e[k] == nil then t[k] = nil; t._fields[k] = nil end
+            end
+            for k in pairs(e) do t._fields[k] = true end
             -- 已追踪：同步全部数据字段（pos/vel 之外的 kind/damage/endPos/angle 等每帧可变），
             -- 再追加历史
             for k, v in pairs(e) do
-                if k ~= "index" then t[k] = v end
+                t[k] = v
             end
             t.lastFrame = frame
             local head = t.historyHead
@@ -123,4 +135,12 @@ function Tracker.getActive(self, maxStale, frame)
     return result
 end
 
+-- offset=0 为最新样本，直接访问环形槽位，不分配有序副本。
+function Tracker.recent(entry, offset)
+    local n=entry.historyCount or 0
+    if n<=offset then return nil end
+    if not entry.historyHead then return entry.history[n-offset] end
+    local idx=(entry.historyHead-2-offset)%HISTORY_MAX+1
+    return entry.history[idx]
+end
 return Tracker

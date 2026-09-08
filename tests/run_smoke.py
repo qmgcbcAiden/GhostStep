@@ -1,33 +1,30 @@
-# tests/run_smoke.py
-# 用 lupa Lua 5.1（与 Isaac 引擎一致）运行 GhostStep3 离线冒烟测试
-import os
-import sys
+"""Run Lua 5.1 and 5.3 syntax, behavioral and callback integration checks."""
+import argparse
+from pathlib import Path
+from lupa import lua51, lua53
 
-from lupa import lua51
+ROOT = Path(__file__).resolve().parents[1]
 
-lua = lua51.LuaRuntime(unpack_returned_tuples=True)
-
-base = os.path.dirname(os.path.abspath(__file__))
-mod_root = os.path.dirname(base)
-
-
-def run():
-    root = mod_root.replace(os.sep, "/")
-    lua.execute(f'package.path = "{root}/?.lua;{root}/?/init.lua;" .. package.path')
-
-    for name in ("tests/smoke.lua", "tests/smoke_main.lua"):
-        path = os.path.join(mod_root, name)
-        src = open(path, encoding="utf-8").read()
+def run(version):
+    module = {"5.1": lua51, "5.3": lua53}[version]
+    lua = module.LuaRuntime(unpack_returned_tuples=True)
+    lua.globals().mod_root = str(ROOT)
+    lua.execute('package.path = mod_root .. "/?.lua;" .. package.path')
+    compile_lua = lua.eval('function(source, name) local f,err=(loadstring or load)(source,name); assert(f,err) end')
+    for path in ROOT.rglob('*.lua'):
+        if '.git' not in path.parts and 'references' not in path.parts:
+            compile_lua(path.read_text(encoding='utf-8'), str(path.relative_to(ROOT)))
+    for name in ('smoke.lua', 'smoke_main.lua', 'shared_control.lua', 'integration.lua'):
         try:
-            lua.execute(src)
-        except lua51.LuaError as e:
-            print(f"--- {name} FAILED ---")
-            print(e)
-            sys.exit(1)
+            lua.execute((ROOT/'tests'/name).read_text(encoding='utf-8'))
+        except module.LuaError:
+            print(f'FAILED: Lua {version}: {name}', flush=True)
+            raise
+    print(f'Lua {version}: syntax + all behavior/integration checks passed', flush=True)
 
-    # smoke_main.lua 的结果通过 print 输出；失败会 raise error
-    print("\n(runner: smoke completed)")
-
-
-if __name__ == "__main__":
-    run()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--lua', choices=('5.1', '5.3', 'both'), default='both')
+    args = parser.parse_args()
+    for version in ('5.1', '5.3') if args.lua == 'both' else (args.lua,):
+        run(version)

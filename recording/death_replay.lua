@@ -23,10 +23,13 @@ function DeathReplay.dumpLines(ringBuffer, seconds)
     local step = math.max(1, math.floor(take / 60))
     local dangerPeak = 0
     local activeCount = 0
+    for i = 1, #recent do
+        local s=recent[i]
+        if s.threat and s.threat>dangerPeak then dangerPeak=s.threat end
+        if s.layer and s.layer~="none" then activeCount=activeCount+1 end
+    end
     for i = 1, #recent, step do
         local s = recent[i]
-        if s.threat and s.threat > dangerPeak then dangerPeak = s.threat end
-        if s.layer ~= "none" then activeCount = activeCount + 1 end
         -- 附加威胁类型计数（非零才打，避免行过长）——分析漏判时定位是哪类传感器
         local extra = ""
         if (s.laser or 0) > 0 then extra = extra .. " 激光" .. s.laser end

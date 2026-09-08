@@ -17,7 +17,7 @@ local SETTINGS = {
     { "常规", "enabled",            "bool",   true,  "自动躲避总开关" },
     { "常规", "toggleKey",          "key",    56,    "开启/关闭快捷键 (默认左Alt)" },
     { "常规", "preset",             "number", 2,     min = 1, max = 3, step = 1,
-      names = { "安全", "平衡", "激进" }, info = "预设档位" },
+      names = { "低", "适中", "高" }, info = "辅助强度：适中为默认；高档更早、更明显地修正输入" },
     -- 危险源
     { "危险源", "hazardProjectiles", "bool",  true, "躲避敌方弹幕" },
     { "危险源", "hazardContact",      "bool",  true, "躲避敌人接触伤害" },
@@ -27,29 +27,22 @@ local SETTINGS = {
     { "危险源", "hazardNpcAttacks",  "bool",  true, "躲避NPC攻击前兆 (Phase 3)" },
     { "危险源", "hazardSpikes",      "bool",  true, "躲避地刺" },
     { "危险源", "hazardTnt",         "bool",  true, "躲避TNT爆炸" },
-    -- 躲避
-    { "躲避", "maxDodgeWeight",    "percent", 85, "最大AI权重 (玩家控制权保护)" },
-    { "躲避", "threatSensitivity", "number",  2,  min = 1, max = 3, step = 1,
-      names = { "低", "平衡", "高" }, info = "威胁感知灵敏度" },
-    { "躲避", "anticipateStrength", "scroll",  5,  "提前规避强度 (0-10)" },
-    { "躲避", "wallEscapeSensitivity", "number", 2, min = 1, max = 3, step = 1,
-      names = { "低", "中", "高" }, info = "墙角挣脱灵敏度" },
-    { "躲避", "directionSmoothFrames", "number", 3, min = 1, max = 10, step = 1,
-      info = "方向平滑帧数" },
+    -- 躲避（共享控制参数由辅助强度统一设置）
     -- 显示
     { "显示", "renderEnabled",    "bool", false, "视觉反馈总开关" },
     { "显示", "renderThreatBar",  "bool", true,  "威胁等级指示器" },
     { "显示", "renderDodgeArrow", "bool", true,  "闪避方向箭头" },
-    { "显示", "renderWeight",     "bool", true,  "AI介入权重显示" },
-    { "显示", "renderGradient",   "bool", false, "弹幕场梯度可视化" },
+    { "显示", "renderWeight",     "bool", true,  "输入修正幅度显示" },
+    { "显示", "renderGradient",   "bool", false, "旧梯度显示（预测控制不使用）" },
     { "显示", "pureMode",         "bool", false, "纯净模式: 关闭所有视觉效果" },
     -- 录制
-    { "录制", "recordingEnabled",   "bool",   false, "录制功能" },
+    { "录制", "recordingEnabled",   "bool",   true, "录制功能" },
     { "录制", "deathReplayEnabled", "bool",   true,  "死亡自动回放" },
     { "录制", "replayBufferSeconds", "number", 30,   min = 10, max = 120, step = 10,
       suffix = " 秒", info = "回放缓冲大小" },
     { "录制", "snapshotDetail",      "number", 2,    min = 1, max = 4, step = 1,
       names = { "最小", "标准", "详细", "全量" }, info = "快照详情级别（全量=逐威胁明细+候选评分，文件较大）" },
+    { "录制", "eventRecording", "bool", false, "事件诊断：开启后预采集详细前后文（增加采集开销，内存有上限）" },
     -- 调试
     { "调试", "observationMode",    "bool", false, "观察模式: 只采集不控制" },
     { "调试", "profilerEnabled",    "bool", false, "性能分析器" },
@@ -126,6 +119,7 @@ function MCM.loadSettings()
             config[k] = v
         end
     end
+    if presetsRef then presetsRef.apply(config, config.preset) end
     -- 派生参数需重放副作用（灵敏度联动阈值等，存档只存旋钮本身）
     local reapply = { "threatSensitivity", "wallEscapeSensitivity" }
     for _, attr in ipairs(reapply) do
@@ -152,6 +146,7 @@ local function onChange(attr, value)
     else
         if config[attr] ~= nil then config[attr] = value end
     end
+    require("config/runtime").suspendThreat(stateRef)
     -- 副作用
     local effect = SIDE_EFFECTS[attr]
     if effect then effect(stateRef, value) end
@@ -322,8 +317,8 @@ function MCM.register(deps)
         local a = stateRef.hitAttribution
         if not a or a.total == 0 then return "受击归因: 本局无受击" end
         return string.format(
-            "受击归因(%d次): 未检测%d 太晚%d 方向%d 权重%d 受阻%d 不及%d",
-            a.total, a.undetected, a.late, a.wrongDir, a.lowWeight, a.blocked, a.tooFast)
+            "掉血诊断(%d次): 无命中预测%d 疑似受阻%d 待复核%d",
+            a.total, a.undetected, a.blocked, a.unresolved or 0)
     end)
     -- 文件输出状态（--luadebug 说明）
     ModConfigMenu.AddText(CAT, "录制", function()

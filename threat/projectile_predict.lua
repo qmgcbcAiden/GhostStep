@@ -1,3 +1,4 @@
+local History = require("entities/tracker")
 -- threat/projectile_predict.lua
 -- 弹幕轨迹预测
 --   Phase 1: 直线闭式解（二次方程求根，无逐步模拟）
@@ -94,7 +95,7 @@ function Predict.isCurved(entry, minOmega)
     if not entry.history or entry.historyCount < 3 then return false end
     local h = entry.history
     local n = entry.historyCount
-    local c = fitCircle(h[n - 2], h[n - 1], h[n])
+    local c = fitCircle(History.recent(entry,2), History.recent(entry,1), History.recent(entry,0))
     if not c then return false end
     return math.abs(c.omega) >= (minOmega or 0.02)
 end
@@ -113,8 +114,8 @@ function Predict.isTracking(entry)
     -- 取最近3个样本的速度方向，检查是否持续转向
     local turns = 0
     for i = n - 2, n - 1 do
-        local v1 = h[i].vel
-        local v2 = h[i + 1].vel
+        local v1 = History.recent(entry,n-i).vel
+        local v2 = History.recent(entry,n-i-1).vel
         local len1 = v1:Length()
         local len2 = v2:Length()
         if len1 > 0.5 and len2 > 0.5 then
@@ -138,8 +139,8 @@ function Predict.timeToHitTracking(entry, playerPos, playerVel, playerRadius, ho
     local h = entry.history
     local n = entry.historyCount
     -- 用最近两帧的平均速度（趋势速度）代替瞬时速度
-    local avgVelX = (h[n - 1].vel.X + h[n].vel.X) / 2
-    local avgVelY = (h[n - 1].vel.Y + h[n].vel.Y) / 2
+    local avgVelX = (History.recent(entry,1).vel.X + History.recent(entry,0).vel.X) / 2
+    local avgVelY = (History.recent(entry,1).vel.Y + History.recent(entry,0).vel.Y) / 2
     local rel = playerPos - entry.pos
     local vrelX = playerVel.X - avgVelX
     local vrelY = playerVel.Y - avgVelY
@@ -152,7 +153,7 @@ function Predict.timeToHitArc(entry, playerPos, playerVel, playerRadius, horizon
     if not entry.history or entry.historyCount < 3 then return nil end
     local h = entry.history
     local n = entry.historyCount
-    local c = fitCircle(h[n - 2], h[n - 1], h[n])
+    local c = fitCircle(History.recent(entry,2), History.recent(entry,1), History.recent(entry,0))
     if not c then return nil end
 
     local combined = entry.radius + playerRadius

@@ -1,208 +1,129 @@
--- recording/session_recorder.lua
--- 可选持久化录制：写 JSONL 独立文件（Phase 4 提前实装，用户点名要文件输出）
---
--- 关键约束: Isaac 的 Lua 沙箱默认没有 io/debug 库——写文件必须用 --luadebug 启动游戏
---   (Steam → 以撒 → 属性 → 启动选项填 --luadebug)
--- 降级策略: io 不可用时静默退回纯内存环形缓冲（现状），MCM 录制页会显示原因
---
--- 输出: <mod根>/recordings/session_<时间戳>_<种子>.jsonl
---   mod根 = 从脚本位置向上找到 metadata.xml 的目录（不硬编码任何机器路径）
---   recordings/ 为录制数据专属目录，与代码目录完全隔离；建不出来时退回内存模式
---   每帧一行 JSON（Snapshot.capture 的平铺表）
---   事件行: {"ev":"hit"/"death"/"room"/"session_start", ...}
---
--- 文件写入模式参考 auto_dodge_helper 的 diag export（io nil 检测 + debug.getinfo 定位
--- mod 目录），为已验证的社区实践
-
-local SessionRecorder = {}
-
-local FLUSH_EVERY = 150 -- 每150帧(5秒)刷盘；事件立即刷
-
---- 检测 io/debug 可用性（沙箱内为 nil，访问 nil 全局不报错）
-local function ioAvailable()
-    local ok, res = pcall(function()
-        return type(io) == "table" and type(io.open) == "function"
-    end)
-    return ok and res
-end
-
---- 定位脚本自身目录（--luadebug 下 debug.getinfo 的 source 是 @绝对路径）
-local function scriptDirectory()
-    local ok, info = pcall(function() return debug.getinfo(1, "S") end)
-    if not ok or info == nil or info.source == nil then return nil end
-    local source = info.source
-    if string.sub(source, 1, 1) ~= "@" then return nil end
-    return string.match(string.sub(source, 2), "^(.*)[/\\][^/\\]+$")
-end
-
---- 从脚本目录向上找 metadata.xml（每个 Isaac mod 根目录必有），定位 mod 根
---- 最多向上 4 层，兼容未来脚本层级调整；找不到返回 nil（退回内存模式）
-local function modRootDirectory()
-    local dir = scriptDirectory()
-    for _ = 1, 4 do
-        if dir == nil then return nil end
-        local okOpen, f = pcall(io.open, dir .. "\\metadata.xml", "r")
-        if okOpen and f ~= nil then
-            f:close()
-            return dir
-        end
-        dir = string.match(dir, "^(.*)[/\\][^/\\]+$")
+-- JSONL 有界队列。游戏帧内只写固定字节批次；异常/返回 nil 都视为失败，保留队列并停止重试。
+local Recorder={}
+local okJson,json=pcall(require,"json")
+local encode=okJson and json.encode or require("utils/json_encode")
+local sep=package.config and package.config:sub(1,1) or '/'
+local function rootDir()
+    if not io or not io.open or not debug or not debug.getinfo then return nil end
+    local source=debug.getinfo(1,'S').source
+    local dir=source:match('^@(.*)[/\\][^/\\]+$')
+    for _=1,5 do
+        if not dir then return nil end
+        local f=io.open(dir..sep..'metadata.xml','r')
+        if f then f:close(); return dir end
+        dir=dir:match('^(.*)[/\\][^/\\]+$')
     end
-    return nil
 end
-
---- 确保目录存在（Lua 无 mkdir，借 os.execute 调系统命令；已存在时静默）
-local function ensureDirectory(path)
-    return pcall(function()
-        os.execute('md "' .. path .. '" >nul 2>&1')
-    end)
+function Recorder.create(config)
+    local dir=rootDir()
+    return setmetatable({available=dir~=nil,dir=dir,lines={},lineCount=0,queuedBytes=0,totalFrames=0,
+        totalBytes=0,dropped=0,sequence=0,config=config or {},encoder=encode,framesSinceFlush=0},{__index=Recorder})
 end
-
---- 创建实例
-function SessionRecorder.create()
-    local self = {
-        available = ioAvailable(),
-        file = nil,          -- 打开的文件句柄
-        filePath = nil,      -- 当前文件路径（MCM 展示用）
-        lines = {},          -- 待写缓冲
-        lineCount = 0,
-        framesSinceFlush = 0,
-        totalFrames = 0,
-        dir = nil,
-    }
-    if self.available then
-        self.dir = modRootDirectory()
-        if self.dir == nil then
-            self.available = false
-        end
-    end
-    return setmetatable(self, { __index = SessionRecorder })
+function Recorder.unavailableReason(self)
+    return self.lastError or "需 --luadebug 和可写的 recordings 目录；当前保留内存回放"
 end
-
---- 不可用原因（MCM 展示）
-function SessionRecorder.unavailableReason(self)
-    return "不可用 — 需用 --luadebug 启动游戏 (Steam→属性→启动选项)"
-end
-
---- 开始一个新录制会话（每局一个文件）
---- seedString: 种子；meta: 可选 {char=角色类型, stage=开局层数}
-function SessionRecorder.startSession(self, seedString, meta)
-    if not self.available then return false end
-    self:closeFile()
-
-    local stamp = "s"
-    local okT, res = pcall(function() return os.date("%Y%m%d_%H%M%S") end)
-    if okT and type(res) == "string" then stamp = res end
-    local safeSeed = string.gsub(tostring(seedString or ""), "[^%w]", "")
-
-    -- 专属数据目录 <mod根>/recordings/，与代码目录隔离；
-    -- 目录建不出来或不可写 → 退回内存模式，绝不写入代码所在目录
-    local recordingsDir = self.dir .. "\\recordings"
-    ensureDirectory(recordingsDir)
-    local path = recordingsDir .. "\\session_" .. stamp .. "_" .. safeSeed .. ".jsonl"
-    local okOpen, file = pcall(io.open, path, "a")
-    if okOpen and file ~= nil then
-        self.file = file
-        self.filePath = path
-        self.lines = {}
-        self.lineCount = 0
-        self.framesSinceFlush = 0
-        self.totalFrames = 0
-        local head = '{"ev":"session_start","seed":"' .. tostring(seedString or "") .. '"'
-        if meta then
-            if meta.char ~= nil then head = head .. ',"char":' .. tostring(meta.char) end
-            if meta.stage ~= nil then head = head .. ',"stage":' .. tostring(meta.stage) end
-        end
-        self:writeLine(head .. "}")
-        self:flush()
-        Isaac.DebugString("[GhostStep3] 录制文件: " .. path)
-        return true
-    end
-    self.available = false
-    Isaac.DebugString("[GhostStep3] 录制目录不可用: " .. recordingsDir .. "，退回内存模式")
+function Recorder.fail(self,reason)
+    self.failed=true; self.lastError=tostring(reason)
+    Isaac.DebugString('[GhostStep3] 录制已停止: '..self.lastError..'；待写队列已保留，文件尾部可能不完整')
     return false
 end
-
---- 写一行（暂存缓冲）
-function SessionRecorder.writeLine(self, line)
-    if not self.file then return end
-    self.lineCount = self.lineCount + 1
-    self.lines[self.lineCount] = line
+function Recorder.startSession(self,seed,meta)
+    if not self.available then return false end
+    self:closeFile()
+    local dir=self.dir..sep..'recordings'
+    local mkdir
+    if sep=='\\' then mkdir='md "'..dir:gsub('"','')..'" >nul 2>&1'
+    else mkdir="mkdir -p '"..dir:gsub("'","'\\''").."'" end
+    if os and os.execute then pcall(os.execute,mkdir) end
+    local stamp=os and os.date and os.date('%Y%m%d_%H%M%S') or 'session'
+    local safeSeed=tostring(seed or ''):gsub('[^%w]','')
+    self.sessionIndex=(self.sessionIndex or 0)+1
+    local path=dir..sep..'session_'..stamp..'_'..safeSeed..'_'..tostring(Isaac.GetTime())..'_'..self.sessionIndex..'.jsonl'
+    local ok,file,err=pcall(io.open,path,'a')
+    if not ok or not file then return self:fail(err or file or 'open failed') end
+    self.file,self.filePath=file,path
+    self.lines,self.lineCount,self.queuedBytes={},0,0
+    self.failed,self.lastError=false,nil
+    self.sequence,self.totalFrames,self.totalBytes,self.dropped=0,0,0,0
+    local fields={ev='session_start',seed=tostring(seed or ''),schemaVersion=2,
+        clock='Isaac.GetTime',clockResolutionMs=1}
+    for k,v in pairs(meta or {}) do fields[k]=v end
+    self:event(fields)
+    return self:flush()
 end
-
---- 刷盘
-function SessionRecorder.flush(self)
-    if not self.file or self.lineCount == 0 then return true end
-    for i = 1, self.lineCount do
-        pcall(function() self.file:write(self.lines[i], "\n") end)
+function Recorder.writeLine(self,line,critical)
+    if not self.file or self.failed then return false end
+    local max=self.config.recorderMaxBytes or 1048576
+    local size=#line+1
+    local reserve=math.min(65536,math.floor(max*0.1))
+    local limit=critical and max or max-reserve
+    local maxLine=self.config.recorderMaxLineBytes or 32768
+    if size>maxLine or self.queuedBytes+size>limit then
+        self.dropped=self.dropped+1
+        if critical then self.lastError='queue_overflow: important event omitted' end
+        return false
     end
-    pcall(function() self.file:flush() end)
-    self.lines = {}
-    self.lineCount = 0
-    self.framesSinceFlush = 0
+    self.lineCount=self.lineCount+1; self.lines[self.lineCount]=line; self.queuedBytes=self.queuedBytes+size
     return true
 end
-
---- 压入一帧快照（snapshot 为平铺表，jsonEncoder = json.encode）
-function SessionRecorder.push(self, snapshot, jsonEncoder)
+function Recorder.flush(self,maxBytes)
+    if self.failed then return false end
+    if not self.file or self.lineCount==0 then return true end
+    local count,bytes=0,0
+    local limit=maxBytes or self.config.recorderBatchBytes or 32768
+    for i=1,self.lineCount do
+        if i>1 and bytes+#self.lines[i]+1>limit then break end
+        count=i; bytes=bytes+#self.lines[i]+1
+    end
+    local payload=table.concat(self.lines,'\n',1,count)..'\n'
+    local ok,res,err=pcall(self.file.write,self.file,payload)
+    if not ok or res==nil or res==false then return self:fail(err or res or 'write failed') end
+    local fok,fres,ferr=pcall(self.file.flush,self.file)
+    if not fok or fres==nil or fres==false then return self:fail(ferr or fres or 'flush failed') end
+    for i=count+1,self.lineCount do self.lines[i-count]=self.lines[i] end
+    for i=self.lineCount-count+1,self.lineCount do self.lines[i]=nil end
+    self.lineCount=self.lineCount-count; self.queuedBytes=self.queuedBytes-bytes
+    self.totalBytes=self.totalBytes+bytes
+    return true
+end
+function Recorder.encode(self,obj,jsonEncoder)
+    self.sequence=self.sequence+1
+    obj.seq=self.sequence; obj.schemaVersion=2
+    local ok,line=pcall(jsonEncoder or self.encoder,obj)
+    if not ok or type(line)~='string' then self.dropped=self.dropped+1; self.lastError='encode failed'; return nil end
+    return line
+end
+function Recorder.push(self,snapshot,jsonEncoder)
+    self.totalFrames=self.totalFrames+1
+    local line=self:encode(snapshot,jsonEncoder)
+    if line then self:writeLine(line,false) end
+    return line -- 同一不可变字符串供事件前后文缓存复用。
+end
+function Recorder.event(self,fields)
+    if not self.file then return false end
+    fields.frame=fields.frame or self.frame
+    fields.tick=fields.tick or self.tick
+    fields.decisionId=fields.decisionId or self.tick
+    local line=self:encode(fields)
+    return line and self:writeLine(line,true) or false
+end
+function Recorder.eventJson(self,obj,jsonEncoder) return self:event(obj) end
+function Recorder.context(self,eventId,line)
+    -- line 已由同一编码器产生；封套仅含受控的整数及字段名。
+    self.sequence=self.sequence+1
+    return self:writeLine('{"ev":"context","schemaVersion":2,"seq":'..self.sequence..',"eventId":'..eventId..',"snapshot":'..line..'}',false)
+end
+function Recorder.tickWriter(self)
+    if self.lineCount>0 then self:flush(self.config.recorderBatchBytes or 32768) end
+end
+function Recorder.closeFile(self)
     if not self.file then return end
-    self.totalFrames = self.totalFrames + 1
-    self.framesSinceFlush = self.framesSinceFlush + 1
-    local ok, line = pcall(jsonEncoder, snapshot)
-    if ok and type(line) == "string" then
-        self:writeLine(line)
-    end
-    if self.framesSinceFlush >= FLUSH_EVERY then
-        self:flush()
-    end
+    while self.lineCount>0 and not self.failed do self:flush() end
+    pcall(self.file.close,self.file); self.file=nil
 end
-
---- 记录事件（hit/death/room/level/cfg变更），立即刷盘
---- 数字: 整数写整数（frame=123 而非 123.00），小数保留两位
-function SessionRecorder.event(self, fields)
-    if not self.file then return end
-    local parts = {}
-    for k, v in pairs(fields or {}) do
-        if type(v) == "number" then
-            local fmt = (v == math.floor(v)) and "%.0f" or "%.2f"
-            parts[#parts + 1] = '"' .. k .. '":' .. string.format(fmt, v)
-        else
-            parts[#parts + 1] = '"' .. k .. '":"' .. tostring(v) .. '"'
-        end
-    end
-    self:writeLine('{' .. table.concat(parts, ",") .. "}")
-    self:flush()
+function Recorder.statusText(self)
+    if self.lastError then return '文件输出: '..self.lastError..' 丢弃 '..self.dropped end
+    if not self.available then return '文件输出: '..self:unavailableReason() end
+    return self.file and ('录制 '..self.totalFrames..' 帧，队列 '..self.queuedBytes..' 字节，丢弃 '..self.dropped) or '文件输出: 就绪'
 end
-
---- 记录任意嵌套表事件（如开局 cfg 完整 dump），立即刷盘
---- obj 需含 ev 字段；jsonEncoder = json.encode
-function SessionRecorder.eventJson(self, obj, jsonEncoder)
-    if not self.file or not jsonEncoder then return end
-    local ok, line = pcall(jsonEncoder, obj)
-    if ok and type(line) == "string" then
-        self:writeLine(line)
-        self:flush()
-    end
-end
-
---- 关闭文件
-function SessionRecorder.closeFile(self)
-    if self.file then
-        self:flush()
-        pcall(function() self.file:close() end)
-        self.file = nil
-    end
-end
-
---- 状态摘要（MCM 录制/调试页）
-function SessionRecorder.statusText(self)
-    if not self.available then
-        return "文件输出: " .. self:unavailableReason()
-    end
-    if self.file then
-        return "文件输出: 录制中 " .. self.totalFrames .. " 帧"
-    end
-    return "文件输出: 就绪（进入对局后创建文件）"
-end
-
-return SessionRecorder
+return Recorder
