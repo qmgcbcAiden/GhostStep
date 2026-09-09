@@ -11,12 +11,23 @@ def analyze(path):
     reasons = collections.Counter()
     amplitudes = collections.Counter()
     cadence = collections.Counter()
+    perf = collections.defaultdict(collections.Counter)
+    terrain = collections.Counter()
     previous = None
     max_evaluated = 0
     for line in Path(path).open(encoding='utf-8-sig'):
         if not line.strip():
             continue
         row = json.loads(line)
+        if row.get('ev') == 'terrain':
+            for cell in row.get('cells', []):
+                if len(cell) >= 3 and cell[1] == 'tnt':
+                    terrain['tnt_samples'] += 1
+                    if cell[2] == 0:
+                        terrain['tnt_without_collision'] += 1
+        for key, value in row.get('perfPrevious', {}).items():
+            if key.endswith('Ms') and isinstance(value, (int, float)):
+                perf[key][value] += 1
         if 'metrics' not in row or 'px' not in row:
             continue
         counts['decisions'] += 1
@@ -39,7 +50,18 @@ def analyze(path):
             if error < 0.01:
                 counts['position_matches_previous_velocity'] += 1
         previous = row
-    return dict(counts=counts, reasons=reasons, active_amplitudes=amplitudes,
+    stages = {}
+    for key, histogram in perf.items():
+        total = sum(histogram.values())
+        cumulative, p99 = 0, 0
+        for value in sorted(histogram):
+            cumulative += histogram[value]
+            p99 = value
+            if cumulative > int(total * 0.99):
+                break
+        stages[key] = dict(samples=total, p99=p99, maximum=max(histogram),
+                           over33ms=sum(n for value, n in histogram.items() if value > 33))
+    return dict(terrain=terrain, stages=stages, counts=counts, reasons=reasons, active_amplitudes=amplitudes,
                 feedback_cadence=cadence, max_evaluated=max_evaluated)
 
 

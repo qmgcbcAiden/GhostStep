@@ -79,6 +79,8 @@ function Snapshot.finalize(snap, state, detailLevel, hazards, config)
         snap.recordQueueBytes = state.sessionRecorder.queuedBytes
         snap.recordDropped = state.sessionRecorder.dropped
         snap.recordError = state.sessionRecorder.lastError
+        snap.recordIoPaused = state.sessionRecorder.ioPaused or false
+        snap.recordMaxWriteMs = state.sessionRecorder.maxWriteMs or 0
     end
     if state.motion then snap.model={a=state.motion.a,b=state.motion.b,samples=state.motion.samples,error=state.motion.error} end
     if detailLevel >= 1 then

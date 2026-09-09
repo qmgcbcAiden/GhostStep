@@ -50,6 +50,42 @@ test('terrain uses every linear index, radius and closed outside boundary',funct
     assert(not t:isSafeAt(Vector(160,160),10))
     t:refresh(r,true,Defaults.get(),7); assert(t:isSafeAt(Vector(160,160),10),'flight refresh immediate')
 end)
+test('destroyed TNT residue cannot recreate an invisible terrain obstacle',function()
+    local r=room()
+    -- 爆炸后 GridEntity 仍存在，State/VarData 未清零；Room 碰撞值才是当前结果。
+    local collision=GridCollisionClass.COLLISION_OBJECT
+    r.GetGridEntity=function(_,index)
+        if index==40 then return {CollisionClass=GridCollisionClass.COLLISION_OBJECT,
+            State=4,VarData=1,GetType=function() return GridEntityType.GRID_TNT end} end
+    end
+    r.GetGridCollision=function(_,index)
+        return index==40 and collision or GridCollisionClass.COLLISION_NONE
+    end
+    local cfg=Defaults.get();local t=Terrain.create(); t:build(r,false,cfg)
+    assert(not t:isSafeAt(Vector(160,160),10),'intact TNT still blocks movement')
+    local revision=t.revision
+    collision=GridCollisionClass.COLLISION_NONE
+    t:refresh(r,false,cfg,3)
+    assert(t.grid[41].walkable and t.grid[41].danger==nil,'exploded residue is passable')
+    assert(t:isSafeAt(Vector(160,160),10) and t.revision>revision)
+    local cleanRevision=t.revision
+    for frame=6,30,3 do
+        t:refresh(r,false,cfg,frame)
+        assert(t.revision==cleanRevision and t:isSafeAt(Vector(160,160),10),'no ghost recreation')
+    end
+    local st=state();st.player.position=Vector(160,160)
+    assert(run(st,{},t,30)==nil and st.decision.reason=='nominal_safe',
+        'empty destroyed TNT cell must not trigger escape planning')
+    t:refresh(r,true,cfg,33)
+    assert(t:isSafeAt(Vector(160,160),10),'flight also ignores residue')
+end)
+test('missing physical entity is excluded from live hazards before history expires',function()
+    local tr=Tracker.create()
+    tr:update({{index=1,seed=1,kind='bomb',pos=Vector(0,0),vel=Vector(0,0),radius=90}},1,'bomb')
+    tr:update({},2,'bomb')
+    assert(tr.count==1,'history retained until expiry')
+    assert(#tr:getActive(0,2)==0,'historical entity cannot enter the current hazard view')
+end)
 test('ring-history prediction starts at current position after wrap',function()
     local tr=Tracker.create()
     for f=1,25 do
@@ -177,6 +213,30 @@ test('recorder write and flush failures remain visible without dropping buffered
         assert(sr:flush()==false and sr.failed and sr.lineCount==1)
         assert(sr:flush()==false and sr.lastError=='disk full')
     end
+end)
+test('live recorder buffers writes without forcing a flush each frame',function()
+    local sr=require('recording/session_recorder').create()
+    local writes,flushes=0,0
+    sr.file={write=function(self) writes=writes+1;return self end,
+        flush=function() flushes=flushes+1;return true end,close=function() return true end}
+    for frame=1,3 do sr:writeLine('{}');sr:tickWriter() end
+    assert(writes==3 and flushes==0 and sr.lineCount==0)
+    sr:writeLine('{}');sr:flush()
+    assert(flushes==1,'explicit flush still supported for lifecycle durability')
+end)
+test('slow synchronous write pauses subsequent I/O while preserving a bounded queue',function()
+    local sr=require('recording/session_recorder').create({recorderSlowWriteMs=8,recorderMaxBytes=256})
+    local oldClock=Isaac.GetTime;local now,writes=0,0
+    Isaac.GetTime=function() return now end
+    sr.file={write=function(self) writes=writes+1;now=now+45;return self end,
+        flush=function() error('live frames must not force flush') end}
+    sr:writeLine('{}');sr:tickWriter()
+    local paused,latency=sr.ioPaused,sr.lastWriteMs
+    for frame=1,100 do sr:writeLine('0123456789');sr:tickWriter() end
+    Isaac.GetTime=oldClock
+    assert(paused and latency==45 and sr.maxWriteMs==45)
+    assert(writes==1 and sr.queuedBytes<=256 and sr.dropped>0)
+    assert(sr:statusText():find('暂停',1,true))
 end)
 test('recorder queue and flush batch are bounded; JSON escapes user strings',function()
     local sr=require('recording/session_recorder').create({recorderMaxBytes=128,recorderBatchBytes=16})

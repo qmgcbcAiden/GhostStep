@@ -44,6 +44,7 @@ function Defaults.get()
         eventMaxBytes = 2097152,
         recorderMaxBytes = 1048576,
         recorderBatchBytes = 32768,
+        recorderSlowWriteMs = 8, -- 单次慢写后暂停本局磁盘输出，内存回放继续
         maxDodgeWeight = 0.85,      -- AI 权重上限（原则2：永不 1.0）
         threatLow = 0.25,           -- 低威胁阈值：低于此完全不介入（灵敏度联动：高=0.20 平衡=0.25 低=0.31）
         threatMedium = 0.45,        -- 中威胁阈值：提前规避阶段上限

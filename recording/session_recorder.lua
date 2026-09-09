@@ -1,4 +1,4 @@
--- JSONL 有界队列。游戏帧内只写固定字节批次；异常/返回 nil 都视为失败，保留队列并停止重试。
+-- JSONL 有界队列。帧内缓冲写入，不强制 fflush；慢 I/O 暂停本局文件输出。
 local Recorder={}
 local okJson,json=pcall(require,"json")
 local encode=okJson and json.encode or require("utils/json_encode")
@@ -44,6 +44,8 @@ function Recorder.startSession(self,seed,meta)
     self.file,self.filePath=file,path
     self.lines,self.lineCount,self.queuedBytes={},0,0
     self.failed,self.lastError=false,nil
+    self.ioPaused,self.lastWriteMs,self.maxWriteMs=false,0,0
+    if file.setvbuf then pcall(file.setvbuf,file,"full",65536) end
     self.sequence,self.totalFrames,self.totalBytes,self.dropped=0,0,0,0
     local fields={ev='session_start',seed=tostring(seed or ''),schemaVersion=2,
         clock='Isaac.GetTime',clockResolutionMs=1}
@@ -66,7 +68,7 @@ function Recorder.writeLine(self,line,critical)
     self.lineCount=self.lineCount+1; self.lines[self.lineCount]=line; self.queuedBytes=self.queuedBytes+size
     return true
 end
-function Recorder.flush(self,maxBytes)
+function Recorder.flush(self,maxBytes,buffered)
     if self.failed then return false end
     if not self.file or self.lineCount==0 then return true end
     local count,bytes=0,0
@@ -78,8 +80,10 @@ function Recorder.flush(self,maxBytes)
     local payload=table.concat(self.lines,'\n',1,count)..'\n'
     local ok,res,err=pcall(self.file.write,self.file,payload)
     if not ok or res==nil or res==false then return self:fail(err or res or 'write failed') end
-    local fok,fres,ferr=pcall(self.file.flush,self.file)
-    if not fok or fres==nil or fres==false then return self:fail(ferr or fres or 'flush failed') end
+    if not buffered then
+        local fok,fres,ferr=pcall(self.file.flush,self.file)
+        if not fok or fres==nil or fres==false then return self:fail(ferr or fres or 'flush failed') end
+    end
     for i=count+1,self.lineCount do self.lines[i-count]=self.lines[i] end
     for i=self.lineCount-count+1,self.lineCount do self.lines[i]=nil end
     self.lineCount=self.lineCount-count; self.queuedBytes=self.queuedBytes-bytes
@@ -114,7 +118,18 @@ function Recorder.context(self,eventId,line)
     return self:writeLine('{"ev":"context","schemaVersion":2,"seq":'..self.sequence..',"eventId":'..eventId..',"snapshot":'..line..'}',false)
 end
 function Recorder.tickWriter(self)
-    if self.lineCount>0 then self:flush(self.config.recorderBatchBytes or 32768) end
+    self.lastWriteMs=0
+    if self.ioPaused or self.failed or self.lineCount==0 then return end
+    local begin=Isaac.GetTime()
+    local ok=self:flush(self.config.recorderBatchBytes or 32768,true)
+    self.lastWriteMs=Isaac.GetTime()-begin
+    self.maxWriteMs=math.max(self.maxWriteMs or 0,self.lastWriteMs)
+    if ok and self.lastWriteMs>(self.config.recorderSlowWriteMs or 8) then
+        -- 同步 I/O 无法在调用中打断；第一次慢写后停止后续写盘，不在战斗中重试。
+        self.ioPaused=true
+        self:event({ev="recording_io_paused",writeMs=self.lastWriteMs})
+        Isaac.DebugString('[GhostStep3] 文件写入耗时 '..self.lastWriteMs..'ms，已暂停本局文件输出；内存回放继续，重新开关录制可恢复')
+    end
 end
 function Recorder.closeFile(self)
     if not self.file then return end
@@ -122,6 +137,7 @@ function Recorder.closeFile(self)
     pcall(self.file.close,self.file); self.file=nil
 end
 function Recorder.statusText(self)
+    if self.ioPaused then return '文件输出: 慢写盘已暂停，内存回放继续；丢弃 '..self.dropped end
     if self.lastError then return '文件输出: '..self.lastError..' 丢弃 '..self.dropped end
     if not self.available then return '文件输出: '..self:unavailableReason() end
     return self.file and ('录制 '..self.totalFrames..' 帧，队列 '..self.queuedBytes..' 字节，丢弃 '..self.dropped) or '文件输出: 就绪'

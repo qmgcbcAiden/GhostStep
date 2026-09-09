@@ -26,7 +26,9 @@ function Terrain.build(self, room, fly, config)
             if ((typ == G.GRID_SPIKES or typ == G.GRID_SPIKES_ONOFF) and (g.State or 0) == 0)
                 or (typ == G.GRID_ROCK_SPIKED and collision ~= C.COLLISION_NONE) then danger = "spike" end
         end
-        if g and config.hazardTnt and typ == G.GRID_TNT and ((g.State or 0)>1 or (g.VarData or 0)>0) then
+        -- 已炸毁的 TNT 可能保留 State/VarData 与 GridEntity；无碰撞残骸不能重建障碍。
+        if g and config.hazardTnt and typ == G.GRID_TNT and collision ~= C.COLLISION_NONE
+            and ((g.State or 0)>1 or (g.VarData or 0)>0) then
             danger, pass = "tnt", false
         end
         local old = grid[index+1]
