@@ -64,3 +64,29 @@ function INTEGRATION_STEP(frame,entities)
     callbacks[ModCallbacks.MC_POST_PLAYER_UPDATE](mod,player)
     return st.profiler.previous
 end
+
+-- 开局录制启动耗时必须与实际传感器计时隔离。
+do
+    local recorder=st.sessionRecorder
+    local oldStart,oldAvailable=recorder.startSession,recorder.available
+    local oldClock=Isaac.GetTime; local now=0
+    Isaac.GetTime=function() return now end
+    recorder.available=true
+    recorder.startSession=function(self)
+        now=now+1200
+        self.file={write=function(self) return self end,flush=function() return true end,close=function() return true end}
+        return true
+    end
+    local perf=INTEGRATION_STEP(100,{})
+    recorder:closeFile()
+    recorder.startSession,recorder.available=oldStart,oldAvailable
+    Isaac.GetTime=oldClock
+    assert(perf.lifecycleMs==1200 and perf.sensorsMs==0,'startup must not be attributed to sensors')
+    local contextFound=false
+    for _,e in ipairs(events) do
+        if e.ev=='damage_context' then
+            contextFound=true; assert(e.attemptId==1 and e.snapshot and e.phase=='last_decision_before_damage')
+        end
+    end
+    assert(contextFound,'damage must retain its bounded decision context')
+end

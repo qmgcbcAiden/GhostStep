@@ -238,6 +238,36 @@ test('slow synchronous write pauses subsequent I/O while preserving a bounded qu
     assert(writes==1 and sr.queuedBytes<=256 and sr.dropped>0)
     assert(sr:statusText():find('暂停',1,true))
 end)
+test('paused recorder keeps newest snapshots and critical events in sequence at close',function()
+    local sr=require('recording/session_recorder').create({recorderMaxBytes=512})
+    local writes,output=0,''
+    sr.file={write=function(self,s) writes=writes+1;output=output..s;return self end,
+        flush=function() return true end,close=function() return true end}
+    sr.ioPaused=true
+    sr:event({ev='hit',frame=1})
+    for frame=2,100 do sr:push({frame=frame,px=frame});sr:tickWriter() end
+    assert(writes==0 and sr.queuedBytes<=512 and sr.dropped>0)
+    sr:closeFile()
+    assert(output:find('"hit"',1,true) and output:find('"frame":100',1,true))
+    local previous=0
+    for seq in output:gmatch('"seq"%s*:%s*(%d+)') do
+        assert(tonumber(seq)>previous,'retained records must preserve sequence order');previous=tonumber(seq)
+    end
+    assert(sr.queuedBytes==0 and sr.file==nil)
+end)
+test('existing recording directory does not spawn a mkdir process on session start',function()
+    local sr=require('recording/session_recorder').create()
+    local oldOpen,oldExecute=io.open,os.execute
+    local spawned=0
+    sr.available=true;sr.dir='mock'
+    io.open=function() return {write=function(self) return self end,
+        flush=function() return true end,close=function() return true end} end
+    os.execute=function() spawned=spawned+1 end
+    local ok=sr:startSession('seed',{})
+    sr:closeFile()
+    io.open,os.execute=oldOpen,oldExecute
+    assert(ok and spawned==0)
+end)
 test('recorder queue and flush batch are bounded; JSON escapes user strings',function()
     local sr=require('recording/session_recorder').create({recorderMaxBytes=128,recorderBatchBytes=16})
     local out={}
