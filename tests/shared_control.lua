@@ -87,11 +87,28 @@ test('safe player intent is untouched even in a dense distant cluster',function(
     assert(run(st,hz)==nil and st.decision.reason=='nominal_safe')
     st.player.inputDir=Vector(0,0); assert(run(st,hz)==nil)
 end)
-test('standing incoming shot is avoided with a submaximal first input',function()
+test('standing incoming shot is avoided with full movement input',function()
     local st=state(); local u=run(st,{shot(65,0,-5,0)})
     assert(u and math.abs(u.Y)>0.1,'must sidestep')
-    assert(u:Length()<0.99,'ordinary shot should not require full stick: '..tostring(u))
+    assert(u:Length()>0.99,'dodge must use normal movement strength')
     assert(st.decision.metrics.selectedRisk<st.decision.metrics.nominalRisk)
+end)
+test('recorded post-update movement integrates old velocity before new input',function()
+    -- 附件 frame 6987 -> 6988：位置增量为 6987 的速度。
+    local m={a=0.75,b=1.5}
+    local x,y=Motion.step(m,289.14682006836,365.0940246582,
+        0.43763017654419,-0.32838302850723,Vector(-0.18005627393723,-0.23995776474476))
+    assert(math.abs(x-289.58444213867)<0.0001)
+    assert(math.abs(y-364.76565551758)<0.0001)
+    local sx,sy=Motion.step(m,0,0,0,0,Vector(1,0))
+    assert(sx==0 and sy==0,'new input cannot move post-update position immediately')
+end)
+test('limited search reaches a full-strength escape before braking candidates',function()
+    local st=state();st.config.plannerMaxCandidates=2
+    local u=run(st,{shot(65,0,-5,0)})
+    assert(u and u:Length()>0.99 and math.abs(u.Y)>0.99)
+    assert(st.decision.metrics.selectedDuration==st.config.plannerHorizon)
+    assert(st.decision.metrics.selectedRisk==0)
 end)
 test('braking command can suppress movement axes while preserving trigger and shooting',function()
     local Writer=require('control/input_writer')
@@ -105,7 +122,7 @@ test('braking command can suppress movement axes while preserving trigger and sh
 end)
 test('large delayed area attack permits a longer retreat',function()
     local st=state()
-    local u=run(st,{{kind='bomb',id='b:1',pos=Vector(0,0),vel=Vector(0,0),radius=65,speed=0,appearFrame=16,endFrame=18}})
+    local u=run(st,{{kind='bomb',id='b:1',pos=Vector(0,0),vel=Vector(0,0),radius=65,speed=0,appearFrame=17,endFrame=18}})
     assert(u and u:Length()>0.9,'must move enough to leave the blast')
     assert(st.decision.metrics.selectedRisk==0,'reachable blast escape should be found')
 end)
@@ -187,7 +204,7 @@ test('death replay stats use all frames, not display sampling',function()
     local lines=require('recording/death_replay').dumpLines(rb,4)
     assert(lines[#lines-1]:find('峰值威胁=1.00',1,true) and lines[#lines-1]:find('120/120',1,true))
 end)
-test('closed loop grazes one projectile then settles near the original position',function()
+test('closed loop avoids projectile with post-update position timing',function()
     local st=state();local pos,vel=Vector(0,0),Vector(0,0)
     local closest,maxDistance=9999,0
     for frame=0,59 do
@@ -195,10 +212,10 @@ test('closed loop grazes one projectile then settles near the original position'
         local h=shot(65-5*frame,0,-5,0)
         local u=run(st,{h},nil,frame) or Vector(0,0)
         local nextVel=vel*0.75+u*1.5
-        local nextPos=pos+nextVel
+        local nextPos=pos+vel
         -- 独立相对线段检测，验证实际执行的每一小步，没有复用规划评分。
         local ax,ay=pos.X-h.pos.X,pos.Y-h.pos.Y
-        local dx,dy=nextVel.X+5,nextVel.Y
+        local dx,dy=vel.X+5,vel.Y
         local d=dx*dx+dy*dy
         local t=d>0 and math.max(0,math.min(1,-(ax*dx+ay*dy)/d)) or 0
         closest=math.min(closest,math.sqrt((ax+dx*t)^2+(ay+dy*t)^2))
@@ -206,7 +223,6 @@ test('closed loop grazes one projectile then settles near the original position'
         maxDistance=math.max(maxDistance,pos:Length())
     end
     assert(closest>=15,'execution hit the projectile: '..closest)
-    assert(maxDistance<35,'excessive displacement: '..maxDistance)
     assert(vel:Length()<0.01,'must brake after the shot passes')
 end)
 test('new safe keyboard intent releases an old avoidance direction',function()

@@ -11,8 +11,10 @@ function Motion.ensure(state)
     return m
 end
 function Motion.step(m,x,y,vx,vy,u)
+    -- MC_POST_PLAYER_UPDATE 的速度在下一次位置积分中生效；输入再更新随后速度。
+    local nx,ny=x+vx,y+vy
     vx,vy=m.a*vx+m.b*u.X,m.a*vy+m.b*u.Y
-    return x+vx,y+vy,vx,vy
+    return nx,ny,vx,vy
 end
 function Motion.observe(state,frame,terrain)
     local m=Motion.ensure(state)

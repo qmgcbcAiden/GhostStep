@@ -97,9 +97,12 @@ function Terrain.penetration(self,p,r,includeDanger)
     return depth
 end
 function Terrain.isSafeAt(self,p,r) return self:penetration(p,r,true)<=0 end
-function Terrain.segmentSafe(self,a,b,r,includeDanger)
+function Terrain.segmentSafe(self,a,b,r,includeDanger,startDepth,endDepth)
     local steps=math.max(1,math.ceil(a:Distance(b)/math.max(2,math.min(8,(r or 8)*0.5))))
-    for i=0,steps do
+    -- 规划器已算过两端足迹，复用结果避免每个候选重复调用引擎边界 API。
+    if (startDepth or self:penetration(a,r,includeDanger))>0
+        or (endDepth or self:penetration(b,r,includeDanger))>0 then return false end
+    for i=1,steps-1 do
         if self:penetration(a+(b-a)*(i/steps),r,includeDanger)>0 then return false end
     end
     return true

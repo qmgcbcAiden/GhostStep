@@ -1,5 +1,5 @@
 -- 有限动作的滚动预测共享控制。所有候选都是最终可执行输入；
--- 完整评估后选最小必要修正，只执行第一步。预算未完成的候选永不获选。
+-- 完整评估后选正常力度的安全动作，只执行第一步。预算未完成的候选永不获选。
 local Planner={}
 local Reader=require("control/input_reader")
 local Motion=require("control/motion_model")
@@ -9,7 +9,7 @@ local function distance(a,b) return math.sqrt((a.X-b.X)^2+(a.Y-b.Y)^2) end
 local function traceRow(c)
     return {id=c.id,x=c.u.X,y=c.u.Y,duration=c.duration,risk=c.risk,cost=c.cost,
         hit=c.hit,hitId=c.hitId,terrain=c.blocked,complete=c.complete,clearance=c.clearance,
-        exposure=c.exposure,exitTime=c.exitTime,terminalRisk=c.terminalRisk}
+        exposure=c.exposure,exitTime=c.exitTime,terminalRisk=c.terminalRisk,terrainRejected=c.terrainRejected}
 end
 function Planner.run(state,deps,frame)
     local cfg,p,d=deps.config,state.player,state.decision
@@ -67,7 +67,7 @@ function Planner.run(state,deps,frame)
         c.complete=true; c.risk=0; c.exposure=0; c.clearance=nil; c.blocked=false
         local x,y,vx,vy=p.position.X,p.position.Y,p.velocity.X,p.velocity.Y
         local points,danger={{x,y}},{}
-        local travel,deviation,depth=0,0,initialDepth
+        local deviation,depth=0,initialDepth
         local minX,maxX,minY,maxY=x,x,y,y
         for t=1,horizon do
             local u=t<=c.duration and c.u or nominal
@@ -75,11 +75,17 @@ function Planner.run(state,deps,frame)
             if terrain.valid then
                 local pos=Vector(nx,ny)
                 local nextDepth=terrain:penetration(pos,p.radius,true)
-                if (depth<=0 and not terrain:segmentSafe(Vector(x,y),pos,p.radius,true))
+                if (depth<=0 and not terrain:segmentSafe(Vector(x,y),pos,p.radius,true,depth,nextDepth))
                     or (depth>0 and nextDepth>depth+0.01) then c.blocked=true end
                 depth=nextDepth
             end
-            travel=travel+math.sqrt((nx-x)^2+(ny-y)^2)
+            if c.blocked and not mandatory then
+                -- 不可执行的路径无需再扫描弹幕；把预算留给其他方向。
+                c.risk=10000; c.cost=0; c.terminalRisk=0; c.terrainRejected=true
+                metrics.evaluated=metrics.evaluated+1
+                rows[#rows+1]=traceRow(c)
+                return c
+            end
             deviation=deviation+distance(u,nominal)^2
             x,y,vx,vy=nx,ny,nvx,nvy
             points[t+1]={x,y}
@@ -139,7 +145,7 @@ function Planner.run(state,deps,frame)
                 enemyCost=enemyCost+math.max(0,1-dist/80)
             end
         end
-        c.cost=deviation*(cfg.intentPenalty or 3)/horizon+travel*(nominal:Length()<0.01 and 0.045 or 0.006)
+        c.cost=deviation*(cfg.intentPenalty or 3)/horizon
             +smooth*(cfg.smoothPenalty or 0.2)+enemyCost*0.06-exits*0.025
         metrics.evaluated=metrics.evaluated+1
         rows[#rows+1]=traceRow(c)
@@ -156,6 +162,7 @@ function Planner.run(state,deps,frame)
         d.degraded=metrics.denseHorizon or not metrics.complete or Isaac.GetTime()>=deadline
         d.usedBudgetMs=Isaac.GetTime()-begin
         metrics.selectedRisk=best.risk; metrics.selectedId=best.id
+        metrics.selectedDuration=best.duration; metrics.selectedAmplitude=best.u:Length()
         metrics.selectedHit=best.hit; metrics.stuckFrames=m.blockedFrames
         metrics.sensorOmitted=deps.omittedCount or 0
         metrics.coverageComplete=(deps.omittedCount or 0)==0 and metrics.nominalComplete
@@ -182,39 +189,29 @@ function Planner.run(state,deps,frame)
             candidates[#candidates+1]={id=#candidates+1,u=u,duration=duration}
         end
     end
-    -- 原操作、制动和上一动作优先；所有旧方向都重新验算。
-    add(Vector(0,0),4); add(nominal*0.5,4)
-    if memory.last then add(memory.last,4) end
+    -- 先评估可实际撤离的全力度动作，不能让停止/半速占满有限预算。
+    -- 方向每帧重新验证；安全时立即恢复玩家输入，不盲目锁定旧命令。
     local hit=base.hitEntry
     local axis=hit and hit.vel or p.velocity
     if axis:Length()<0.01 and hit then axis=hit.pos-p.position end
+    if memory.last and memory.last:Length()>0.99 then add(memory.last,horizon) end
     if axis:Length()>0.01 then
         axis=axis:Normalized()
         local side=Vector(-axis.Y,axis.X)
-        if #hazards>16 then add(side,horizon); add(side*-1,horizon) end
-        local amplitudes=(#hazards>64 or (base.hit or 99)<5) and {1,0.6,0.3} or {0.3,0.6,1}
-        for _,amplitude in ipairs(amplitudes) do
-            add(nominal+side*amplitude,4); add(nominal-side*amplitude,4)
-        end
+        add(side,horizon); add(side*-1,horizon)
     end
-    if (m.blockedFrames>= (cfg.stuckFrames or 6) or memory.failed>=3) and Isaac.GetTime()<deadline then
-        local dir,nodes=Escape.suggest(p,terrain,hazards,frame,cfg.escapeMaxNodes or 48,deadline,caches)
-        metrics.searchNodes=nodes
-        if dir then add(dir,8) end
+    if hit and (hit.pos-p.position):Length()>0.01 then
+        add((p.position-hit.pos):Normalized(),horizon)
     end
-    -- 8 个方位、3 档力度，短移后恢复玩家输入；大范围威胁另有持续撤离候选。
-    for _,amplitude in ipairs({0.3,0.6,1}) do
-        for i=0,7 do
-            local angle=i*math.pi/4
-            local u=Vector(math.cos(angle),math.sin(angle))*amplitude
-            add(u,4)
-            if amplitude<1 then add(u,math.min(12,horizon)) end
-        end
-    end
+    local directions={}
     for i=0,7 do
         local angle=i*math.pi/4
-        add(Vector(math.cos(angle),math.sin(angle)),horizon)
+        directions[#directions+1]=Vector(math.cos(angle),math.sin(angle))
     end
+    -- 完整撤离与较早恢复原输入都使用全力度，兼顾狭小空间。
+    for _,u in ipairs(directions) do add(u,horizon) end
+    for _,u in ipairs(directions) do add(u,math.min(6,horizon)) end
+    add(Vector(0,0),horizon)
     metrics.candidates=#candidates
     for i=1,#candidates do
         if Isaac.GetTime()>=deadline or metrics.checks>=workLimit then metrics.complete=false; break end
@@ -223,12 +220,22 @@ function Planner.run(state,deps,frame)
         if not c.blocked and (best.blocked or c.risk<best.risk-0.05
             or (math.abs(c.risk-best.risk)<=0.05 and c.cost<best.cost)) then best=c end
     end
+    if best.id==0 and (m.blockedFrames>=(cfg.stuckFrames or 6) or memory.failed>=3)
+        and Isaac.GetTime()<deadline then
+        local dir,nodes=Escape.suggest(p,terrain,hazards,frame,cfg.escapeMaxNodes or 48,deadline,caches)
+        metrics.searchNodes=nodes
+        if dir and Isaac.GetTime()<deadline then
+            local c=evaluate({id=#candidates+1,u=Reader.executable(dir),duration=horizon},false)
+            metrics.candidates=metrics.candidates+1
+            if c and not c.blocked and (best.blocked or c.risk<best.risk-0.05) then best=c end
+        end
+    end
     -- 必须带来可观的风险下降；禁止仅为密度/终点偏好而接管。
     local improvement=base.risk-best.risk
     if best.id~=0 and improvement>=math.max(0.5,(base.exposure or 0)*0.1) then
         d.command=best.u; d.dodgeDir=best.u; d.layer="predictive"
         memory.last=best.u; memory.failed=best.hit and memory.failed+1 or 0
-        return finish(best.hit and "reduce_exposure" or "minimal_safe_correction")
+        return finish(best.hit and "reduce_exposure" or "safe_evasion")
     end
     memory.failed=memory.failed+1
     memory.last=nil
