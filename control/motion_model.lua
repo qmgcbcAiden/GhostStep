@@ -26,12 +26,15 @@ function Motion.observe(state,frame,terrain)
     local moved=p.position:Distance(prev.position)
     local expected=prev.nextPos:Distance(prev.position)
     local err=p.position:Distance(prev.nextPos)
+    local velocityError=dt==1 and prev.nextVel and p.velocity:Distance(prev.nextVel) or nil
     local issued=prev.active and state.control.hookSeen==true
-    state.feedback={decisionId=prev.id,dt=dt,error=err,progress=moved,expected=expected,hookSeen=issued}
+    state.feedback={decisionId=prev.id,dt=dt,error=err,progress=moved,expected=expected,hookSeen=issued,velocityError=velocityError}
     if dt~=1 then m.pending=nil; m.blockedFrames=0; return end
     local blocked=issued and expected>0.5 and moved<math.max(0.15,expected*0.15)
     m.blockedFrames=blocked and m.blockedFrames+1 or 0
-    m.error=m.error*0.9+math.min(err,20)*0.1
+    m.positionError=(m.positionError or 0)*0.9+math.min(err,20)*0.1
+    m.velocityError=(m.velocityError or 0)*0.9+math.min(velocityError or 0,20)*0.1
+    m.error=math.max(m.positionError,m.velocityError)
     if not blocked and p.controlsEnabled~=false and (p.damageCooldown or 0)==0
         and (not prev.active or issued) and err<8
         and (not terrain.valid or terrain:isSafeAt(p.position,p.radius+2)) then
@@ -57,9 +60,9 @@ function Motion.commit(state,frame)
     local m=Motion.ensure(state)
     local u=state.control.active and state.control.direction or Reader.executable(state.player.inputDir)
     local p=state.player
-    local x,y=Motion.step(m,p.position.X,p.position.Y,p.velocity.X,p.velocity.Y,u)
+    local x,y,vx,vy=Motion.step(m,p.position.X,p.position.Y,p.velocity.X,p.velocity.Y,u)
     m.pending={frame=frame,id=state.logicTick,position=p.position,velocity=p.velocity,input=u,
-        active=state.control.active,nextPos=Vector(x,y)}
+        active=state.control.active,nextPos=Vector(x,y),nextVel=Vector(vx,vy)}
     state.control.hookSeen=false
 end
 return Motion

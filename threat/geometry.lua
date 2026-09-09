@@ -9,6 +9,16 @@ local function pointSeg(px,py,ax,ay,bx,by)
     local t=d>1e-9 and math.max(0,math.min(1,((px-ax)*dx+(py-ay)*dy)/d)) or 0
     return math.sqrt((px-ax-t*dx)^2+(py-ay-t*dy)^2)
 end
+-- 敌人与玩家的更新不保证同时积分。除同步相对轨迹外，覆盖敌人先移动、
+-- 玩家随后移动的两段接触过程；不改变弹体、炸弹和激光的时序。
+local function circleClearance(kind,px,py,qx,qy,ex,ey,fx,fy,r)
+    local clear=pointSeg(0,0,px-ex,py-ey,qx-fx,qy-fy)-r
+    if kind=="enemy" and clear>0 then
+        clear=math.min(clear,pointSeg(px,py,ex,ey,fx,fy)-r,
+            pointSeg(fx,fy,px,py,qx,qy)-r)
+    end
+    return clear
+end
 G.pointSegmentDistance=pointSeg
 function G.window(e,frame)
     local start=e.appearFrame or (e.fuseFrames and ((e.lastFrame or frame)+e.fuseFrames))
@@ -53,8 +63,9 @@ function G.clearance(e,ax,ay,bx,by,r,t0,t1,frame,cache)
         p1x,p1y=ax+(bx-ax)*(hi-t0)/dt,ay+(by-ay)*(hi-t0)/dt
     end
     if cache and cache.linear then
-        return pointSeg(0,0,p0x-cache.x-cache.vx*lo,p0y-cache.y-cache.vy*lo,
-            p1x-cache.x-cache.vx*hi,p1y-cache.y-cache.vy*hi)-r-cache.radius
+        return circleClearance(e.kind,p0x,p0y,p1x,p1y,
+            cache.x+cache.vx*lo,cache.y+cache.vy*lo,
+            cache.x+cache.vx*hi,cache.y+cache.vy*hi,r+cache.radius)
     end
     local a,b=G.sample(e,lo,frame,cache),G.sample(e,hi,frame,cache)
     if not a or not b then return math.huge end
@@ -67,7 +78,7 @@ function G.clearance(e,ax,ay,bx,by,r,t0,t1,frame,cache)
         local playerSweep=math.sqrt((p1x-p0x)^2+(p1y-p0y)^2)*0.5
         return pointSeg((p0x+p1x)/2,(p0y+p1y)/2,mid[1],mid[2],mid[3],mid[4])-radius-sweep-playerSweep
     end
-    return pointSeg(0,0,p0x-a[1],p0y-a[2],p1x-b[1],p1y-b[2])-radius
+    return circleClearance(e.kind,p0x,p0y,p1x,p1y,a[1],a[2],b[1],b[2],radius)
 end
 -- 包围可达区域筛选。长激光按长度扩展，不能只拿光源附近的九宫格。
 function G.reachable(e,p,r,speed,horizon)
