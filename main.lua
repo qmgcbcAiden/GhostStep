@@ -42,6 +42,7 @@ local hasJson, json = pcall(require, "json")
 local jsonEncode = hasJson and json.encode or require("utils/json_encode")
 
 -- ===== 全局装配 =====
+local okBuild, buildInfo = pcall(require,"config/build")
 local Config = Defaults.get()
 local state = Runtime.create(Config)
 
@@ -175,8 +176,8 @@ MCM.loadSettings()
 local function startRecording()
     if not sessionRecorder.available or sessionRecorder.failed then return end
     local meta={}
-    local okBuild,build=pcall(require,"config/build")
-    if okBuild then meta.build=build end
+    if okBuild and type(buildInfo)=="table" then meta.build=buildInfo
+    else meta.buildError=tostring(buildInfo) end
     local okSeed,seed=pcall(function() return Game():GetSeeds():GetStartSeed() end)
     local okChar,char=pcall(function() return Isaac.GetPlayer(0):GetPlayerType() end)
     local okStage,stage=pcall(function() return Game():GetLevel():GetStage() end)
@@ -277,8 +278,10 @@ local function onPlayerUpdate(player)
     if player:IsDead() then Runtime.suspendThreat(state); return end
     local stages={}
     state.profiler.stages=stages
+    stages.lifecycleMs=Isaac.GetTime()-startTime
+    local sensorsStart=Isaac.GetTime()
     registry:collectAll(state,frame)
-    stages.sensorsMs=Isaac.GetTime()-startTime
+    stages.sensorsMs=Isaac.GetTime()-sensorsStart
     local okHp,hp=pcall(function() return player:GetHearts()+player:GetSoulHearts() end)
     if okHp and type(hp)=="number" then
         local prev=state.player.hp; state.player.hp=hp
@@ -382,7 +385,7 @@ local function onPlayerUpdate(player)
     -- 总耗时要包含编码/写盘；在下一条快照按 tick 明确关联。
     state.profiler.previous={tick=state.logicTick,frame=frame,totalMs=total,sensorsMs=stages.sensorsMs,
         terrainMs=stages.terrainMs,decisionMs=stages.decisionMs,recordingMs=stages.recordingMs,
-        recordPrepareMs=stages.recordPrepareMs,writerMs=stages.writerMs}
+        recordPrepareMs=stages.recordPrepareMs,writerMs=stages.writerMs,lifecycleMs=stages.lifecycleMs}
     if total>math.max(5,Config.budgetMs*3) and frame-lastDiagnosticFrame>=90 then
         lastDiagnosticFrame=frame; eventBuffer:trigger("slow_update",frame,sessionRecorder)
     end
@@ -423,7 +426,14 @@ local function onEntityTakeDmg(entity,amount,flags,source)
         predictedHit=state.threat.framesUntilHit,reason=state.decision.reason}
     state.pendingDamage=ev
     sessionRecorder:event(ev)
-    if Config.recordingEnabled then eventBuffer:trigger("damage_callback",ev.frame,sessionRecorder) end
+    if Config.recordingEnabled then
+        -- 与伤害回调明确关联，保留上一决策的几何/候选证据；不是伤害发生后的精确实体快照。
+        local context=Snapshot.capture(state,state.updateCount,4)
+        Snapshot.finalize(context,state,4,getHazards(state.updateCount),Config)
+        sessionRecorder:event({ev="damage_context",attemptId=ev.attemptId,frame=ev.frame,
+            phase="last_decision_before_damage",snapshot=context})
+        eventBuffer:trigger("damage_callback",ev.frame,sessionRecorder)
+    end
 end
 
 -- ===== 控制台命令（gs，用法: 游戏~键开控制台 → gs / gs status / gs replay / gs on|off）=====
@@ -511,6 +521,8 @@ safeAddCallback(ModCallbacks.MC_POST_GAME_STARTED, function()
         MCM.saveSettings()
         state.lastPlayerUpdate=nil; state.logicTick=0; state.player.hp=nil
         state.pendingDamage=nil; state.damageSequence=0
+        state.profiler.previous=nil
+        sessionRecorder.frame=Isaac.GetFrameCount();sessionRecorder.tick=0
         Runtime.onNewRoom(state); eventBuffer:reset(); ringBuffer:clear()
         state.lastMapRevision=nil
         Runtime.resetHitStats(state) -- 归因统计按局累积，新对局清零
@@ -564,4 +576,4 @@ end)
 GhostStep3.State = state
 GhostStep3.Config = Config
 
-Isaac.DebugString("[GhostStep3] predictive-shared-control loaded — 预测式微走位辅助")
+Isaac.DebugString("[GhostStep3] predictive-shared-control loaded — 预测式闪避辅助")

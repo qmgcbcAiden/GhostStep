@@ -9,6 +9,9 @@ from pathlib import Path
 def analyze(path):
     counts = collections.Counter()
     reasons = collections.Counter()
+    events = collections.Counter()
+    coverage = {}
+    last_sequence = None
     amplitudes = collections.Counter()
     cadence = collections.Counter()
     perf = collections.defaultdict(collections.Counter)
@@ -19,6 +22,17 @@ def analyze(path):
         if not line.strip():
             continue
         row = json.loads(line)
+        events[row.get('ev', 'snapshot')] += 1
+        if isinstance(row.get('seq'), int):
+            if last_sequence is not None and row['seq'] > last_sequence + 1:
+                counts['missing_sequences'] += row['seq'] - last_sequence - 1
+            last_sequence = row['seq']
+        if isinstance(row.get('frame'), int):
+            coverage['last_event_frame'] = max(coverage.get('last_event_frame', 0), row['frame'])
+        if 'px' in row:
+            counts['snapshots'] += 1
+            coverage.setdefault('first_snapshot_frame', row['frame'])
+            coverage['last_snapshot_frame'] = row['frame']
         if row.get('ev') == 'terrain':
             for cell in row.get('cells', []):
                 if len(cell) >= 3 and cell[1] == 'tnt':
@@ -61,7 +75,7 @@ def analyze(path):
                 break
         stages[key] = dict(samples=total, p99=p99, maximum=max(histogram),
                            over33ms=sum(n for value, n in histogram.items() if value > 33))
-    return dict(terrain=terrain, stages=stages, counts=counts, reasons=reasons, active_amplitudes=amplitudes,
+    return dict(events=events, coverage=coverage, terrain=terrain, stages=stages, counts=counts, reasons=reasons, active_amplitudes=amplitudes,
                 feedback_cadence=cadence, max_evaluated=max_evaluated)
 
 

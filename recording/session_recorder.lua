@@ -31,18 +31,23 @@ function Recorder.startSession(self,seed,meta)
     if not self.available then return false end
     self:closeFile()
     local dir=self.dir..sep..'recordings'
-    local mkdir
-    if sep=='\\' then mkdir='md "'..dir:gsub('"','')..'" >nul 2>&1'
-    else mkdir="mkdir -p '"..dir:gsub("'","'\\''").."'" end
-    if os and os.execute then pcall(os.execute,mkdir) end
     local stamp=os and os.date and os.date('%Y%m%d_%H%M%S') or 'session'
     local safeSeed=tostring(seed or ''):gsub('[^%w]','')
     self.sessionIndex=(self.sessionIndex or 0)+1
     local path=dir..sep..'session_'..stamp..'_'..safeSeed..'_'..tostring(Isaac.GetTime())..'_'..self.sessionIndex..'.jsonl'
     local ok,file,err=pcall(io.open,path,'a')
+    -- 优先直接打开；目录存在时不启动 shell（开新局不应重复 mkdir）。
+    if not ok or not file then
+        local mkdir
+        if sep=='\\' then mkdir='md "'..dir:gsub('"','')..'" >nul 2>&1'
+        else mkdir="mkdir -p '"..dir:gsub("'","'\\''").."'" end
+        if os and os.execute then pcall(os.execute,mkdir) end
+        ok,file,err=pcall(io.open,path,'a')
+    end
     if not ok or not file then return self:fail(err or file or 'open failed') end
     self.file,self.filePath=file,path
     self.lines,self.lineCount,self.queuedBytes={},0,0
+    self.recent={}; self.recentFirst=1; self.recentLast=0
     self.failed,self.lastError=false,nil
     self.ioPaused,self.lastWriteMs,self.maxWriteMs=false,0,0
     if file.setvbuf then pcall(file.setvbuf,file,"full",65536) end
@@ -53,6 +58,15 @@ function Recorder.startSession(self,seed,meta)
     self:event(fields)
     return self:flush()
 end
+local function evictRecent(self)
+    local first=self.recentFirst or 1
+    local line=self.recent and self.recent[first]
+    if not line then return false end
+    self.queuedBytes=self.queuedBytes-#line-1
+    self.recent[first]=nil; self.recentFirst=first+1
+    self.dropped=self.dropped+1
+    return true
+end
 function Recorder.writeLine(self,line,critical)
     if not self.file or self.failed then return false end
     local max=self.config.recorderMaxBytes or 1048576
@@ -60,12 +74,22 @@ function Recorder.writeLine(self,line,critical)
     local reserve=math.min(65536,math.floor(max*0.1))
     local limit=critical and max or max-reserve
     local maxLine=self.config.recorderMaxLineBytes or 32768
+    -- 暂停 I/O 时滚动保留最新快照，关键事件留在主队列，避免只剩开局数据。
+    if self.ioPaused and size<=maxLine then
+        while self.queuedBytes+size>limit and evictRecent(self) do end
+    end
     if size>maxLine or self.queuedBytes+size>limit then
         self.dropped=self.dropped+1
         if critical then self.lastError='queue_overflow: important event omitted' end
         return false
     end
-    self.lineCount=self.lineCount+1; self.lines[self.lineCount]=line; self.queuedBytes=self.queuedBytes+size
+    if self.ioPaused and not critical then
+        self.recent=self.recent or {}; self.recentFirst=self.recentFirst or 1
+        self.recentLast=(self.recentLast or 0)+1; self.recent[self.recentLast]=line
+    else
+        self.lineCount=self.lineCount+1; self.lines[self.lineCount]=line
+    end
+    self.queuedBytes=self.queuedBytes+size
     return true
 end
 function Recorder.flush(self,maxBytes,buffered)
@@ -133,6 +157,14 @@ function Recorder.tickWriter(self)
 end
 function Recorder.closeFile(self)
     if not self.file then return end
+    for i=self.recentFirst or 1,self.recentLast or 0 do
+        self.lineCount=self.lineCount+1; self.lines[self.lineCount]=self.recent[i]
+    end
+    self.recent={};self.recentFirst=1;self.recentLast=0
+    -- 仅关闭文件时合并关键事件与保留快照，按原 seq 排序，帧内不排序、不写盘。
+    table.sort(self.lines,function(a,b)
+        return (tonumber(a:match('"seq"%s*:%s*(%d+)')) or 0)<(tonumber(b:match('"seq"%s*:%s*(%d+)')) or 0)
+    end)
     while self.lineCount>0 and not self.failed do self:flush() end
     pcall(self.file.close,self.file); self.file=nil
 end
