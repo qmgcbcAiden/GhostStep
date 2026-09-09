@@ -14,7 +14,7 @@ local R=require('config/runtime')
 local D=require('config/defaults')
 local T=require('sensors/terrain')
 Isaac.GetTime=function() return os.clock()*1000 end
-function benchmark(n)
+function benchmark(n,kind)
     local st=R.create(D.get())
     st.player.moveSpeed=1
     local hz={}
@@ -22,7 +22,7 @@ function benchmark(n)
         local a=i*2.39996
         local d=60+(i%40)*5
         local x,y=math.cos(a)*d,math.sin(a)*d
-        hz[i]={id='p:'..i,kind='projectile',pos=Vector(x,y),vel=Vector(-x/d*4,-y/d*4),radius=4,speed=4}
+        hz[i]={id='p:'..i,kind=kind or 'projectile',pos=Vector(x,y),vel=Vector(-x/d*4,-y/d*4),radius=4,speed=4}
     end
     local cmd=P.run(st,{config=st.config,terrain=T.create(),getHazards=function() return hz end},0)
     return st.decision.usedBudgetMs,st.decision.metrics.evaluated,st.decision.metrics.checks,
@@ -35,6 +35,13 @@ for count in (1, 50, 150, 300):
     print(f'n={count} mean={mean(times):.3f}ms p95={times[28]:.3f}ms max={max(times):.3f}ms '
           f'evaluated={mean(row[1] for row in rows):.1f} checks={mean(row[2] for row in rows):.0f} '
           f'intervened={sum(row[3] for row in rows)}/30 reason={rows[-1][4]} relevant={rows[-1][5]}')
+
+# 接触几何多检查两段顺序移动；在真实墙钟预算下验证其额外 CPU 成本。
+for count in (2, 8, 16, 50):
+    rows = [lua.globals().benchmark(count, 'enemy') for _ in range(30)]
+    times = sorted(row[0] for row in rows)
+    print(f'enemy n={count} mean={mean(times):.3f}ms p95={times[28]:.3f}ms max={max(times):.3f}ms '
+          f'evaluated={mean(row[1] for row in rows):.1f} intervened={sum(row[3] for row in rows)}/30')
 
 # 主更新 CPU：包含传感器、地形、模型、JSON 编码和内存缓存；无真实磁盘 I/O。
 full = lua51.LuaRuntime(unpack_returned_tuples=True)

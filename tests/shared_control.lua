@@ -117,6 +117,58 @@ test('continuous geometry catches a fast crossing between sample endpoints',func
     local q=Query.create(); q:update({shot(-80,0,160,0,2)},0)
     assert(q:firstCollision(Vector(0,0),Vector(0,0),3,1)==0)
 end)
+test('recorded frame 3204 catches enemy movement before the next player integration',function()
+    local g=require('threat/geometry')
+    local e={kind='enemy',pos=Vector(314.04907226563,650.78216552734),
+        vel=Vector(-0.035662323236465,4.7933955192566),radius=13,lastFrame=3204}
+    local x,y=299.541015625,673.57489013672
+    local nx,ny=x-3.4485132694244,y+0.31305766105652
+    local cache=g.prepare(e,3204,18)
+    assert(g.clearance(e,x,y,nx,ny,11.5,0,1,3204,cache)<=0,
+        'enemy can collide before the player reaches the next predicted position')
+    assert(g.clearance(e,x,y,nx,ny,11.5,0,1,3204,{})<=0,'uncached geometry must agree')
+    local st=state();st.player.position=Vector(x,y);st.player.velocity=Vector(nx-x,ny-y)
+    run(st,{e},nil,3204)
+    assert(st.decision.metrics.nominalHit==0,'planner must report immediate contact, not seven frames away')
+end)
+test('phase protection keeps moving bullets and stationary enemies unchanged',function()
+    local g=require('threat/geometry')
+    -- 两者同向等速，弹体相对距离恒定；敌人则可能先经过玩家旧位置。
+    local e={kind='projectile',pos=Vector(0,0),vel=Vector(20,0),radius=2}
+    assert(g.clearance(e,10,0,30,0,2,0,1,0,g.prepare(e,0,1))>0)
+    e.kind='enemy'
+    assert(g.clearance(e,10,0,30,0,2,0,1,0,g.prepare(e,0,1))<=0)
+    e.vel=Vector(0,0)
+    assert(g.clearance(e,10,0,30,0,2,0,1,0,g.prepare(e,0,1))>0)
+end)
+test('zero position residual does not hide incorrect predicted acceleration',function()
+    local st=state();st.player.inputDir=Vector(1,0)
+    st.control.active=true;st.control.direction=Vector(1,0)
+    Motion.commit(st,0)
+    st.control.hookSeen=true
+    st.player.position=Vector(0,0);st.player.velocity=Vector(0,0)
+    Motion.observe(st,1,Terrain.create())
+    assert(st.feedback.error==0 and st.feedback.velocityError>1)
+    assert(st.motion.positionError==0 and st.motion.velocityError>0 and st.motion.error>0)
+end)
+test('closed loop avoids a chasing enemy that moves before the player',function()
+    local st=state();local pos,vel,enemy=Vector(0,0),Vector(0,0),Vector(80,0)
+    st.motion={a=0.85,b=0.6,speed=6,error=0,samples=0,blockedFrames=0}
+    local g=require('threat/geometry');local closest=9999
+    for frame=0,119 do
+        st.player.position,st.player.velocity=pos,vel
+        local ev=(pos-enemy):Normalized()*2.2
+        local h={id='e:1',kind='enemy',pos=enemy,vel=ev,radius=13,speed=2.2}
+        local u=run(st,{h},nil,frame) or Vector(0,0)
+        local movedEnemy=enemy+ev
+        closest=math.min(closest,g.pointSegmentDistance(pos.X,pos.Y,enemy.X,enemy.Y,movedEnemy.X,movedEnemy.Y))
+        local nextPos=pos+vel
+        closest=math.min(closest,g.pointSegmentDistance(movedEnemy.X,movedEnemy.Y,pos.X,pos.Y,nextPos.X,nextPos.Y))
+        pos,enemy,vel=nextPos,movedEnemy,vel*0.85+u*0.6
+    end
+    assert(closest>23,'contact in enemy-first simulation: '..closest)
+    assert(pos:Length()>20,'standing protection must actually move')
+end)
 test('safe player intent is untouched even in a dense distant cluster',function()
     local st=state(); st.player.inputDir=Vector(-1,0)
     local hz={}; for i=1,80 do hz[i]=shot(200+i,80,0,0) end
