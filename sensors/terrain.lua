@@ -26,7 +26,9 @@ function Terrain.build(self, room, fly, config)
             if ((typ == G.GRID_SPIKES or typ == G.GRID_SPIKES_ONOFF) and (g.State or 0) == 0)
                 or (typ == G.GRID_ROCK_SPIKED and collision ~= C.COLLISION_NONE) then danger = "spike" end
         end
-        if g and config.hazardTnt and typ == G.GRID_TNT and ((g.State or 0)>1 or (g.VarData or 0)>0) then
+        -- 已炸毁的 TNT 可能保留 State/VarData 与 GridEntity；无碰撞残骸不能重建障碍。
+        if g and config.hazardTnt and typ == G.GRID_TNT and collision ~= C.COLLISION_NONE
+            and ((g.State or 0)>1 or (g.VarData or 0)>0) then
             danger, pass = "tnt", false
         end
         local old = grid[index+1]
@@ -97,9 +99,12 @@ function Terrain.penetration(self,p,r,includeDanger)
     return depth
 end
 function Terrain.isSafeAt(self,p,r) return self:penetration(p,r,true)<=0 end
-function Terrain.segmentSafe(self,a,b,r,includeDanger)
+function Terrain.segmentSafe(self,a,b,r,includeDanger,startDepth,endDepth)
     local steps=math.max(1,math.ceil(a:Distance(b)/math.max(2,math.min(8,(r or 8)*0.5))))
-    for i=0,steps do
+    -- 规划器已算过两端足迹，复用结果避免每个候选重复调用引擎边界 API。
+    if (startDepth or self:penetration(a,r,includeDanger))>0
+        or (endDepth or self:penetration(b,r,includeDanger))>0 then return false end
+    for i=1,steps-1 do
         if self:penetration(a+(b-a)*(i/steps),r,includeDanger)>0 then return false end
     end
     return true

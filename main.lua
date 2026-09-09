@@ -371,14 +371,18 @@ local function onPlayerUpdate(player)
     else
         eventBuffer:reset()
     end
+    stages.recordPrepareMs=Isaac.GetTime()-preRecord
+    local writerStart=Isaac.GetTime()
     sessionRecorder:tickWriter()
+    stages.writerMs=Isaac.GetTime()-writerStart
     stages.recordingMs=Isaac.GetTime()-preRecord
     local total=Isaac.GetTime()-startTime
     state.profiler.lastFrameMs=total
     state.profiler.avgFrameMs=state.profiler.avgFrameMs*0.95+total*0.05
     -- 总耗时要包含编码/写盘；在下一条快照按 tick 明确关联。
     state.profiler.previous={tick=state.logicTick,frame=frame,totalMs=total,sensorsMs=stages.sensorsMs,
-        terrainMs=stages.terrainMs,decisionMs=stages.decisionMs,recordingMs=stages.recordingMs}
+        terrainMs=stages.terrainMs,decisionMs=stages.decisionMs,recordingMs=stages.recordingMs,
+        recordPrepareMs=stages.recordPrepareMs,writerMs=stages.writerMs}
     if total>math.max(5,Config.budgetMs*3) and frame-lastDiagnosticFrame>=90 then
         lastDiagnosticFrame=frame; eventBuffer:trigger("slow_update",frame,sessionRecorder)
     end
